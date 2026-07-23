@@ -1,0 +1,10 @@
+# Build outputs (see build.sh)
+relay/relay-server
+public/croc.wasm
+public/wasm_exec.js
+
+# GitNexus local index
+.gitnexus/
+
+# OS
+.DS_Store
