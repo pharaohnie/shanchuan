@@ -406,7 +406,7 @@ body {
 }
 
 .file-info-footer:has(.file-total:empty) {
-	justify-content: flex-end;
+	justify-content: center;
 }
 
 .file-total {
@@ -673,6 +673,10 @@ body {
 }
 
 /* ─── Receive Results ───────────────────────────────────────────────────── */
+#receive-text-section {
+	text-align: center;
+}
+
 .receive-text-content {
 	background: var(--surface-2);
 	border: 1px solid var(--border);
@@ -685,6 +689,7 @@ body {
 	word-break: break-word;
 	margin: 12px 0;
 	font-family: inherit;
+	text-align: left;
 }
 
 .download-section {
