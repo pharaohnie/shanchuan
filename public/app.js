@@ -62,10 +62,7 @@ function formatTransferProgress(
 ) {
 	const verb = role === "send" ? "发送中" : "接收中";
 	const pct = progressPercent(globalChunk, batchTotal).toFixed(1);
-	const progressPart =
-		role === "receive"
-			? `${pct}%`
-			: `Chunk ${globalChunk}/${batchTotal} (${pct}%)`;
+	const progressPart = `${pct}%`;
 	if (fileCount > 1) {
 		return `${verb} ${fileIndex + 1}/${fileCount} · ${fileName} · ${progressPart}`;
 	}
@@ -654,7 +651,7 @@ async function sendOneFile(transport, file, fileIndex, fileCount, batchTotalChun
 				global,
 				batchTotalChunks,
 			),
-			"working",
+			"progress",
 		);
 		ui.setProgress("send", progressPercent(global, batchTotalChunks));
 	};
