@@ -98,6 +98,7 @@
               </button>
             </div>
             <div class="status-message" id="send-status">等待中...</div>
+            <div id="send-transport-mode" class="transport-mode hidden"></div>
             <div class="progress-bar-container" id="send-progress-container">
               <div class="progress-bar" id="send-progress-bar"></div>
             </div>
@@ -135,6 +136,7 @@
           <h2>📥 接收文件</h2>
           <div class="status-display">
             <div class="status-message" id="receive-status">连接中...</div>
+            <div id="receive-transport-mode" class="transport-mode hidden"></div>
             <div
               class="progress-bar-container hidden"
               id="receive-progress-container"
@@ -161,11 +163,11 @@
           <h2>🐊 Croc WASM 工作原理</h2>
           <div class="info-diagram">
             <pre>
-  浏览器发送方 ──WebSocket──→ [中继] ←──WebSocket── 浏览器接收方
-        │  PAKE 密钥交换          │         PAKE 密钥交换  │
-        │  AES-GCM 加密          │         AES-GCM 解密  │
-        └────────── 端到端加密文件数据 ──────────────────┘
-          </pre>
+  浏览器发送方 ══WebRTC P2P══ 浏览器接收方  （优先，Cloudflare STUN 打洞）
+        │                                              │
+        │  失败时回退：WebSocket ──→ [中继] ←── WebSocket
+        │  PAKE 密钥交换 + AES-GCM 端到端加密（密文不经服务器解密）
+            </pre>
           </div>
           <div class="info-steps">
             <div class="info-step">
@@ -182,10 +184,23 @@
             <div class="info-step">
               <span class="step-number">2</span>
               <div>
+                <strong>WebRTC P2P 直连</strong>
+                <p>
+                  密钥建立后，双方通过 Cloudflare STUN 尝试浏览器间直连（WebRTC
+                  DataChannel）。成功时文件密文不经中继服务器。<br />
+                  <span class="info-note"
+                    >NAT 复杂时自动回退 WebSocket 中继转发</span
+                  >
+                </p>
+              </div>
+            </div>
+            <div class="info-step">
+              <span class="step-number">3</span>
+              <div>
                 <strong>端到端加密</strong>
                 <p>
                   文件在发送方浏览器中用 AES-256-GCM
-                  加密，密文通过中继传输，接收方浏览器解密。<br />
+                  加密，接收方浏览器解密。<br />
                   <span class="info-note"
                     >中继服务器只能看到密文，无法解密文件内容</span
                   >
@@ -193,7 +208,7 @@
               </div>
             </div>
             <div class="info-step">
-              <span class="step-number">3</span>
+              <span class="step-number">4</span>
               <div>
                 <strong>Go WASM 核心</strong>
                 <p>
@@ -212,8 +227,8 @@
               <span class="tech-tag">Go WASM</span>
               <span class="tech-tag">SPAKE2 PAKE</span>
               <span class="tech-tag">AES-256-GCM</span>
+              <span class="tech-tag">WebRTC P2P</span>
               <span class="tech-tag">WebSocket</span>
-              <span class="tech-tag">Web Crypto API</span>
             </div>
           </div>
         </div>
@@ -228,6 +243,8 @@
       </footer>
     </div>
 
+    <script src="/transport.js"></script>
+    <script src="/p2p.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

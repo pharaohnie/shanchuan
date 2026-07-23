@@ -110,6 +110,27 @@ body {
 	border: 1px solid rgba(167, 139, 250, 0.3);
 }
 
+.transport-mode {
+	display: inline-block;
+	margin: 8px 0 12px;
+	padding: 4px 12px;
+	border-radius: 999px;
+	font-size: 0.85rem;
+	font-weight: 600;
+}
+
+.transport-mode-p2p {
+	background: rgba(52, 211, 153, 0.15);
+	color: var(--success);
+	border: 1px solid rgba(52, 211, 153, 0.3);
+}
+
+.transport-mode-relay {
+	background: rgba(79, 156, 247, 0.15);
+	color: var(--primary);
+	border: 1px solid rgba(79, 156, 247, 0.3);
+}
+
 /* ─── Loading Overlay ─────────────────────────────────────────────────── */
 .loading-overlay {
 	position: fixed;

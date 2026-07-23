@@ -45,6 +45,78 @@ type RelayMessage struct {
 	Room string `json:"room,omitempty"`
 	Role string `json:"role,omitempty"`
 	Msg  string `json:"msg,omitempty"`
+	Mode string `json:"mode,omitempty"`
+}
+
+type StunReport struct {
+	Ok             bool     `json:"ok"`
+	Server         string   `json:"server"`
+	ElapsedMs      int      `json:"elapsedMs"`
+	CandidateTypes []string `json:"candidateTypes,omitempty"`
+	Error          string   `json:"error,omitempty"`
+}
+
+func handleStunCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var report StunReport
+	if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	remote := r.RemoteAddr
+	if report.Ok {
+		log.Printf(
+			"[relay] STUN check from %s: ok server=%s elapsed=%dms types=%v",
+			remote, report.Server, report.ElapsedMs, report.CandidateTypes,
+		)
+	} else {
+		errMsg := report.Error
+		if errMsg == "" {
+			errMsg = "no srflx candidate"
+		}
+		log.Printf(
+			"[relay] STUN check from %s: failed server=%s elapsed=%dms types=%v error=%s",
+			remote, report.Server, report.ElapsedMs, report.CandidateTypes, errMsg,
+		)
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// transportModeFromMessage returns the mode from a transport-mode signaling message.
+func transportModeFromMessage(msg []byte) (string, bool) {
+	var m RelayMessage
+	if err := json.Unmarshal(msg, &m); err != nil {
+		return "", false
+	}
+	if m.Type != "transport-mode" {
+		return "", false
+	}
+	if m.Mode != "p2p" && m.Mode != "relay" {
+		return "", false
+	}
+	return m.Mode, true
+}
+
+func logTransportMode(room string, msgType int, msg []byte) {
+	if room == "" || msgType != websocket.TextMessage {
+		return
+	}
+	mode, ok := transportModeFromMessage(msg)
+	if !ok {
+		return
+	}
+	switch mode {
+	case "p2p":
+		log.Printf("[relay] room '%s': transfer via P2P (file data bypasses relay)", room)
+	case "relay":
+		log.Printf("[relay] room '%s': transfer via relay fallback (file data forwarded)", room)
+	}
 }
 
 func (r *Relay) getOrCreateRoom(name string) *Room {
@@ -116,39 +188,27 @@ func (r *Relay) cleanupLoop() {
 
 // pipeConnections forwards messages between two WebSocket connections.
 // Returns when either connection closes.
-func pipeConnections(a, b *websocket.Conn) {
+func pipeConnections(room string, a, b *websocket.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// a → b
-	go func() {
+	forward := func(src, dst *websocket.Conn) {
 		defer wg.Done()
-		defer b.Close()
+		defer dst.Close()
 		for {
-			msgType, msg, err := a.ReadMessage()
+			msgType, msg, err := src.ReadMessage()
 			if err != nil {
 				return
 			}
-			if err := b.WriteMessage(msgType, msg); err != nil {
+			logTransportMode(room, msgType, msg)
+			if err := dst.WriteMessage(msgType, msg); err != nil {
 				return
 			}
 		}
-	}()
+	}
 
-	// b → a
-	go func() {
-		defer wg.Done()
-		defer a.Close()
-		for {
-			msgType, msg, err := b.ReadMessage()
-			if err != nil {
-				return
-			}
-			if err := a.WriteMessage(msgType, msg); err != nil {
-				return
-			}
-		}
-	}()
+	go forward(a, b)
+	go forward(b, a)
 
 	wg.Wait()
 }
@@ -208,7 +268,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		pipeConnections(first, second)
+		pipeConnections(joinMsg.Room, first, second)
 
 		close(room.done)
 		relay.deleteRoom(joinMsg.Room)
@@ -244,6 +304,7 @@ func main() {
 	go relay.cleanupLoop()
 
 	http.HandleFunc("/ws", handleWebSocket)
+	http.HandleFunc("/api/stun-check", handleStunCheck)
 	http.Handle("/", http.FileServer(http.Dir("../public")))
 
 	addr := ":8154"

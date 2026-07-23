@@ -13,6 +13,16 @@
 const RELAY_URL = `ws://${window.location.host}/ws`;
 const CHUNK_SIZE = 256 * 1024; // 256KB chunks
 const BACKPRESSURE_THRESHOLD = 4 * 1024 * 1024; // pause when ws send buffer > 4MB
+const GCM_OVERHEAD = 12 + 16; // nonce + tag
+const SCTP_DEFAULT_MAX = 256 * 1024; // 262144
+// Margin below SCTP maxMessageSize so encrypted payload fits in one DC message.
+const P2P_MAX_PLAINTEXT = SCTP_DEFAULT_MAX - GCM_OVERHEAD - 64;
+
+function effectiveChunkSize(transport) {
+	return transport?.mode === "p2p"
+		? Math.min(CHUNK_SIZE, P2P_MAX_PLAINTEXT)
+		: CHUNK_SIZE;
+}
 
 // ─── State ────────────────────────────────────────────────────────────────
 const state = {
@@ -31,6 +41,9 @@ const state = {
 	streaming: false, // true when writing to disk via File System Access API
 	writable: null, // FileSystemWritableFileStream (when streaming)
 	fileHandle: null, // FileSystemFileHandle (when streaming)
+	transport: null, // RelayTransport | P2pTransport
+	transportMode: null, // 'p2p' | 'relay'
+	stunReachable: null, // null=checking, true/false=STUN precheck result
 };
 
 // ─── Worker Bridge ────────────────────────────────────────────────────────
@@ -118,6 +131,154 @@ function addLog(tab, text) {
 	el.scrollTop = el.scrollHeight;
 }
 
+function updateTransportModeUI(tab, mode) {
+	state.transportMode = mode;
+	const el = $(`${tab}-transport-mode`);
+	if (!el) return;
+	if (mode === "p2p") {
+		el.textContent = "直连 (P2P)";
+		el.className = "transport-mode transport-mode-p2p";
+	} else {
+		el.textContent = "中继转发";
+		el.className = "transport-mode transport-mode-relay";
+	}
+	el.classList.remove("hidden");
+}
+
+const SIGNALING_MSG_TYPES = new Set([
+	"webrtc-offer",
+	"webrtc-answer",
+	"ice-candidate",
+	"transport-mode",
+]);
+
+function isSignalingMessage(msg) {
+	return SIGNALING_MSG_TYPES.has(msg.type);
+}
+
+async function reportStunCheck(result) {
+	try {
+		const resp = await fetch("/api/stun-check", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(result),
+		});
+		if (!resp.ok) {
+			console.warn("STUN report failed: HTTP", resp.status);
+		}
+	} catch (err) {
+		console.warn("STUN report failed:", err);
+	}
+	return result;
+}
+
+let stunPrecheckStarted = null;
+
+function startStunPrecheck() {
+	if (!stunPrecheckStarted) {
+		stunPrecheckStarted = checkStunConnectivity()
+			.then(reportStunCheck)
+			.then((r) => {
+				state.stunReachable = r.ok;
+				return r;
+			})
+			.catch((err) => {
+				state.stunReachable = false;
+				console.warn("STUN precheck failed:", err);
+				return {
+					ok: false,
+					server: STUN_SERVER,
+					elapsedMs: 0,
+					candidateTypes: [],
+					error: err.message,
+				};
+			});
+	}
+	return stunPrecheckStarted;
+}
+
+async function waitForStunPrecheck() {
+	if (state.stunReachable !== null) {
+		return state.stunReachable;
+	}
+	const r = await startStunPrecheck();
+	return r.ok;
+}
+
+function bindReceiverTransport(transport, enqueue, resolveOnce) {
+	state.transport = transport;
+	transport.onMessage((data) => {
+		enqueue(async () => {
+			await handleReceivedData(data);
+			if (
+				state.totalChunks > 0 &&
+				state.currentChunk >= state.totalChunks
+			) {
+				resolveOnce();
+			}
+		});
+	});
+}
+
+async function setupRelayOnlyTransport(ws, tab, role) {
+	const transport = new RelayTransport(ws);
+	if (role === "sender") {
+		ws.send(JSON.stringify({ type: "transport-mode", mode: "relay" }));
+	}
+	updateTransportModeUI(tab, "relay");
+	addLog(tab, "STUN 预检未通过，跳过 P2P，使用中继");
+	return transport;
+}
+
+async function setupReceiverTransport(ws, negotiator, enqueue, resolveOnce) {
+	const reachable = await waitForStunPrecheck();
+	if (!reachable) {
+		if (negotiator) negotiator.destroy();
+		const transport = await setupRelayOnlyTransport(
+			ws,
+			"receive",
+			"receiver",
+		);
+		bindReceiverTransport(transport, enqueue, resolveOnce);
+		return;
+	}
+
+	const { mode, p2pTransport } = await negotiator.waitReady();
+	const transport =
+		mode === "p2p" ? p2pTransport : new RelayTransport(ws);
+	state.transport = transport;
+	updateTransportModeUI("receive", mode);
+	addLog(
+		"receive",
+		mode === "p2p"
+			? "P2P 直连已建立，等待接收文件..."
+			: "P2P 不可用，使用中继转发...",
+	);
+	bindReceiverTransport(transport, enqueue, resolveOnce);
+}
+
+async function setupSenderTransport(ws, assignNegotiator, flushPendingSignaling) {
+	const reachable = await waitForStunPrecheck();
+	if (!reachable) {
+		return setupRelayOnlyTransport(ws, "send", "sender");
+	}
+
+	const n = new P2pNegotiator(ws, "sender");
+	if (assignNegotiator) assignNegotiator(n);
+	await n.start();
+	if (flushPendingSignaling) flushPendingSignaling();
+	const { mode, p2pTransport } = await n.waitReady();
+	const transport =
+		mode === "p2p" ? p2pTransport : new RelayTransport(ws);
+	n.sendSignaling({ type: "transport-mode", mode });
+	updateTransportModeUI("send", mode);
+	addLog(
+		"send",
+		mode === "p2p" ? "P2P 直连已建立" : "P2P 不可用，使用中继转发",
+	);
+	return transport;
+}
+
 // ─── Send Flow ────────────────────────────────────────────────────────────
 function handleFileSelect(event) {
 	const file = event.target.files[0];
@@ -190,6 +351,23 @@ async function connectAndTransfer() {
 		state.ws = ws;
 
 		let pakeState = "init"; // init -> waiting -> paired -> pake -> complete
+		let negotiator = null;
+		const pendingSignaling = [];
+
+		const flushPendingSignaling = () => {
+			if (!negotiator) return;
+			for (const msg of pendingSignaling.splice(0)) {
+				negotiator.handleMessage(msg).catch((e) => rejectOnce(e));
+			}
+		};
+
+		const handleSignaling = (msg) => {
+			if (negotiator) {
+				negotiator.handleMessage(msg).catch((e) => rejectOnce(e));
+			} else {
+				pendingSignaling.push(msg);
+			}
+		};
 		let settled = false;
 		const resolveOnce = (v) => {
 			if (!settled) {
@@ -234,6 +412,8 @@ async function connectAndTransfer() {
 						pakeState = "paired";
 						addLog(state.role, `Connected as ${state.role}! Starting PAKE...`);
 						enqueue(() => runPAKEInit());
+					} else if (isSignalingMessage(msg)) {
+						handleSignaling(msg);
 					} else if (msg.type === "error") {
 						rejectOnce(new Error(msg.msg || "Relay error"));
 					}
@@ -241,7 +421,14 @@ async function connectAndTransfer() {
 				}
 				if (event.data instanceof ArrayBuffer) {
 					const data = new Uint8Array(event.data);
-					enqueue(() => handleBinary(data));
+					if (pakeState === "pake") {
+						enqueue(() => handleBinary(data));
+					} else if (
+						pakeState === "complete" &&
+						state.transport?.mode === "relay"
+					) {
+						state.transport.dispatch(data);
+					}
 					return;
 				}
 			} catch (err) {
@@ -306,31 +493,40 @@ async function connectAndTransfer() {
 
 					if (state.role === "sender") {
 						$("send-status").textContent =
+							"🔑 密钥已建立，协商 P2P 连接...";
+						const transport = await setupSenderTransport(
+							ws,
+							(n) => {
+								negotiator = n;
+							},
+							flushPendingSignaling,
+						);
+						$("send-status").textContent =
 							"🔑 密钥已建立，开始发送文件...";
-						await sendFile(ws);
+						await sendFile(transport);
 						resolveOnce();
 						ws.close();
 					} else {
 						$("receive-status").textContent =
-							"🔑 密钥已建立，等待接收文件...";
+							"🔑 密钥已建立，协商 P2P 连接...";
 						state._metadataReceived = false;
 						state.merged = null;
 						state.mergeOffset = 0;
 						state.currentChunk = 0;
 						state.totalChunks = 0;
 						state.receivedMetadata = null;
+						if (!negotiator) {
+							negotiator = new P2pNegotiator(ws, "receiver");
+							await negotiator.start();
+							flushPendingSignaling();
+						}
+						await setupReceiverTransport(
+							ws,
+							negotiator,
+							enqueue,
+							resolveOnce,
+						);
 					}
-				}
-				return;
-			}
-
-			if (pakeState === "complete" && state.role === "receiver") {
-				await handleReceivedData(data);
-				if (
-					state.totalChunks > 0 &&
-					state.currentChunk >= state.totalChunks
-				) {
-					resolveOnce();
 				}
 				return;
 			}
@@ -341,11 +537,12 @@ async function connectAndTransfer() {
 // ─── Sender: Pipelined File Transfer ─────────────────────────────────────
 // Double-buffered pipeline: while chunk i is being sent, chunk i+1 is already
 // being read + encrypted in the Worker. This overlaps file I/O, Worker
-// encryption, and ws.send so throughput is bounded by the slowest stage rather
-// than their sum. Backpressure (bufferedAmount) prevents unbounded buffering.
-async function sendFile(ws) {
+// encryption, and transport.send so throughput is bounded by the slowest stage
+// rather than their sum. Backpressure (bufferedAmount) prevents unbounded buffering.
+async function sendFile(transport) {
 	const file = state.files[0];
-	const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+	const chunkSize = effectiveChunkSize(transport);
+	const totalChunks = Math.ceil(file.size / chunkSize);
 	state.totalChunks = totalChunks;
 	state.currentChunk = 0;
 	const keyBytes = state.sessionKeyBytes;
@@ -364,7 +561,7 @@ async function sendFile(ws) {
 		}),
 	);
 	const metadataEnc = await wasmCall("wasmEncrypt", keyBytes, null, metadataBytes);
-	ws.send(metadataEnc);
+	transport.send(metadataEnc);
 	addLog("send", "Metadata sent");
 
 	$("send-status").textContent = `📤 发送中... 0/${totalChunks}`;
@@ -374,8 +571,8 @@ async function sendFile(ws) {
 	// Read file chunk i into a Uint8Array.
 	const readChunk = (i) =>
 		new Promise((resolve) => {
-			const start = i * CHUNK_SIZE;
-			const end = Math.min(start + CHUNK_SIZE, file.size);
+			const start = i * chunkSize;
+			const end = Math.min(start + chunkSize, file.size);
 			fileReader.onload = () => resolve(new Uint8Array(fileReader.result));
 			fileReader.readAsArrayBuffer(file.slice(start, end));
 		});
@@ -386,15 +583,8 @@ async function sendFile(ws) {
 		return wasmCall("wasmEncrypt", keyBytes, encodeSeq(i), chunkData);
 	};
 
-	// Wait if the ws send buffer is too full (backpressure).
-	const drain = () =>
-		new Promise((resolve) => {
-			const check = () => {
-				if (ws.bufferedAmount <= BACKPRESSURE_THRESHOLD) resolve();
-				else setTimeout(check, 1);
-			};
-			check();
-		});
+	// Wait if the send buffer is too full (backpressure).
+	const drain = () => transport.drain(BACKPRESSURE_THRESHOLD);
 
 	// Pipelined send: prefetch chunk i+1 while sending chunk i.
 	let prefetch = encryptChunk(0);
@@ -404,7 +594,7 @@ async function sendFile(ws) {
 			prefetch = encryptChunk(i + 1); // start next read+encrypt now
 		}
 		await drain();
-		ws.send(encrypted);
+		transport.send(encrypted);
 
 		state.currentChunk = i + 1;
 		$("send-status").textContent = `📤 发送中... ${i + 1}/${totalChunks}`;
@@ -731,4 +921,5 @@ document.addEventListener("DOMContentLoaded", () => {
 	// the first wasmCall awaits worker readiness if needed.
 	document.querySelector(".loading-overlay")?.remove();
 	$("app-content").classList.remove("hidden");
+	startStunPrecheck();
 });

@@ -49,6 +49,52 @@ func TestRoomExpireSafeWhenReadyAlreadyClosed(t *testing.T) {
 	room.expire("Room expired due to inactivity")
 }
 
+func TestHandleStunCheck(t *testing.T) {
+	body := `{"ok":true,"server":"stun.cloudflare.com:3478","elapsedMs":120,"candidateTypes":["host","srflx"]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/stun-check", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handleStunCheck(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/stun-check", nil)
+	rec = httptest.NewRecorder()
+	handleStunCheck(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/stun-check", strings.NewReader("not json"))
+	rec = httptest.NewRecorder()
+	handleStunCheck(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestTransportModeFromMessage(t *testing.T) {
+	mode, ok := transportModeFromMessage([]byte(`{"type":"transport-mode","mode":"p2p"}`))
+	if !ok || mode != "p2p" {
+		t.Fatalf("expected p2p, got %q ok=%v", mode, ok)
+	}
+
+	mode, ok = transportModeFromMessage([]byte(`{"type":"transport-mode","mode":"relay"}`))
+	if !ok || mode != "relay" {
+		t.Fatalf("expected relay, got %q ok=%v", mode, ok)
+	}
+
+	_, ok = transportModeFromMessage([]byte(`{"type":"webrtc-offer"}`))
+	if ok {
+		t.Fatal("expected false for non transport-mode message")
+	}
+
+	_, ok = transportModeFromMessage([]byte(`not json`))
+	if ok {
+		t.Fatal("expected false for invalid json")
+	}
+}
+
 func TestHandleWebSocketFirstClientExpires(t *testing.T) {
 	relay.rooms = make(map[string]*Room)
 
