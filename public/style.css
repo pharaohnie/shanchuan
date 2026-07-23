@@ -236,6 +236,83 @@ body {
 	display: none !important;
 }
 
+/* ─── Send Mode (file / text) ─────────────────────────────────────────── */
+.send-mode-bar {
+	display: flex;
+	gap: 8px;
+	margin-bottom: 16px;
+}
+
+.send-mode-btn {
+	flex: 1;
+	padding: 10px 16px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--surface-2);
+	color: var(--text-muted);
+	font-size: 14px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: all 0.2s;
+}
+
+.send-mode-btn:hover {
+	border-color: var(--primary);
+	color: var(--text);
+}
+
+.send-mode-btn.active {
+	border-color: var(--primary);
+	background: rgba(79, 156, 247, 0.12);
+	color: var(--primary);
+}
+
+.text-input-area {
+	width: 100%;
+	min-height: 160px;
+	padding: 12px 14px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--surface-2);
+	color: var(--text);
+	font-family: inherit;
+	font-size: 14px;
+	line-height: 1.5;
+	resize: vertical;
+	margin-bottom: 12px;
+}
+
+.text-input-area:focus {
+	outline: none;
+	border-color: var(--primary);
+}
+
+.text-char-count {
+	display: block;
+	font-size: 12px;
+	color: var(--text-muted);
+	margin-bottom: 4px;
+}
+
+.receive-text-content {
+	max-height: 320px;
+	overflow: auto;
+	padding: 14px 16px;
+	margin-bottom: 12px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--surface-2);
+	color: var(--text);
+	font-size: 14px;
+	line-height: 1.5;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+#receive-text-section {
+	margin-top: 16px;
+}
+
 /* ─── Drop Zone ───────────────────────────────────────────────────────── */
 .drop-zone {
 	border: 2px dashed var(--border);

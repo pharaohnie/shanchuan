@@ -51,7 +51,26 @@
       <!-- ========== SEND TAB ========== -->
       <div id="tab-send" class="tab-content active">
         <div class="card" id="send-upload-card">
-          <h2>选择要发送的文件</h2>
+          <h2>选择要发送的内容</h2>
+          <div class="send-mode-bar">
+            <button
+              type="button"
+              class="send-mode-btn active"
+              data-send-mode="file"
+              onclick="setSendMode('file')"
+            >
+              文件
+            </button>
+            <button
+              type="button"
+              class="send-mode-btn"
+              data-send-mode="text"
+              onclick="setSendMode('text')"
+            >
+              文本
+            </button>
+          </div>
+          <div id="send-file-panel">
           <div class="drop-zone" id="drop-zone">
             <div class="drop-zone-content">
               <span class="drop-icon">📁</span>
@@ -72,6 +91,16 @@
                 选择文件（可多选）
               </button>
             </div>
+          </div>
+          </div>
+          <div id="send-text-panel" class="hidden">
+            <textarea
+              id="send-text-input"
+              class="text-input-area"
+              placeholder="输入要发送的文本..."
+              oninput="updateTextSendReady()"
+            ></textarea>
+            <span id="send-text-count" class="text-char-count">0 字符</span>
           </div>
           <div id="send-file-info" class="file-info hidden">
             <div class="file-detail">
@@ -145,6 +174,16 @@
               <div class="progress-bar" id="receive-progress-bar"></div>
             </div>
             <div class="log-output" id="receive-log"></div>
+            <div id="receive-text-section" class="hidden">
+              <pre id="receive-text-content" class="receive-text-content"></pre>
+              <button
+                type="button"
+                class="btn btn-secondary"
+                id="btn-copy-text"
+              >
+                复制文本
+              </button>
+            </div>
             <div id="receive-download-section" class="hidden download-section">
               <div id="receive-download-list" class="download-list"></div>
             </div>

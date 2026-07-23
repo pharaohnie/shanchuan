@@ -119,6 +119,9 @@ const state = {
 	receivedFiles: [], // [{name, url}] in memory fallback mode
 	batchTotalChunks: 0, // total chunks across batch (receiver)
 	batchDoneChunks: 0, // chunks from fully received files (receiver)
+	sendMode: "file", // "file" | "text"
+	textSend: false, // true when sending prepared text file
+	isTextPayload: false, // true when receiving kind:text metadata
 };
 
 // ─── Worker Bridge ────────────────────────────────────────────────────────
@@ -371,6 +374,59 @@ async function setupSenderTransport(ws, assignNegotiator, flushPendingSignaling)
 }
 
 // ─── Send Flow ────────────────────────────────────────────────────────────
+const MAX_TEXT_BYTES = 1024 * 1024;
+
+function setSendMode(mode) {
+	state.sendMode = mode;
+	for (const btn of document.querySelectorAll("[data-send-mode]")) {
+		btn.classList.toggle("active", btn.dataset.sendMode === mode);
+	}
+	$("send-file-panel").classList.toggle("hidden", mode !== "file");
+	$("send-text-panel").classList.toggle("hidden", mode !== "text");
+	if (mode === "file") {
+		if (state.files.length > 0) {
+			renderSelectedFiles();
+		} else {
+			$("send-file-info").classList.add("hidden");
+		}
+	} else {
+		updateTextSendReady();
+	}
+}
+
+function prepareTextFile() {
+	const text = $("send-text-input").value;
+	if (!text.trim()) throw new Error("请输入要发送的文本");
+	const bytes = new TextEncoder().encode(text);
+	if (bytes.length > MAX_TEXT_BYTES) throw new Error("文本超过 1MB 限制");
+	return new File([bytes], "message.txt", { type: "text/plain" });
+}
+
+function updateTextSendReady() {
+	if (state.sendMode !== "text") return;
+	const text = $("send-text-input").value;
+	const bytes = new TextEncoder().encode(text);
+	const countEl = $("send-text-count");
+	const charCount = [...text].length;
+	countEl.textContent = `${charCount} 字符`;
+	const btn = $("btn-start-send");
+	if (!text.trim()) {
+		$("send-file-info").classList.add("hidden");
+		return;
+	}
+	if (bytes.length > MAX_TEXT_BYTES) {
+		countEl.textContent = `${formatSize(bytes.length)}（超过 1MB 限制）`;
+		btn.disabled = true;
+		$("send-file-info").classList.remove("hidden");
+		return;
+	}
+	$("send-file-list").innerHTML = "";
+	$("send-file-total-size").textContent =
+		`${charCount} 字符 · ${formatSize(bytes.length)}`;
+	$("send-file-info").classList.remove("hidden");
+	btn.disabled = false;
+}
+
 function renderSelectedFiles() {
 	const list = $("send-file-list");
 	const totalEl = $("send-file-total-size");
@@ -402,12 +458,26 @@ function renderSelectedFiles() {
 function handleFileSelect(event) {
 	const files = Array.from(event.target.files || []);
 	if (files.length === 0) return;
+	state.sendMode = "file";
+	setSendMode("file");
 	state.files = files;
 	renderSelectedFiles();
 }
 
 async function startSend() {
-	if (state.files.length === 0) return;
+	if (state.sendMode === "text") {
+		try {
+			state.files = [prepareTextFile()];
+			state.textSend = true;
+		} catch (err) {
+			alert(err.message);
+			return;
+		}
+	} else if (state.files.length === 0) {
+		return;
+	} else {
+		state.textSend = false;
+	}
 
 	const btn = $("btn-start-send");
 	btn.disabled = true;
@@ -421,10 +491,14 @@ async function startSend() {
 	$("send-code").textContent = state.code;
 	$("send-upload-card").classList.add("hidden");
 	$("send-progress-card").classList.remove("hidden");
-	const fileLabel =
-		state.files.length === 1
-			? "📤 发送文件"
-			: `📤 发送 ${state.files.length} 个文件`;
+	let fileLabel;
+	if (state.textSend) {
+		fileLabel = "📤 发送文本";
+	} else if (state.files.length === 1) {
+		fileLabel = "📤 发送文件";
+	} else {
+		fileLabel = `📤 发送 ${state.files.length} 个文件`;
+	}
 	$("send-progress-card").querySelector("h2").textContent = fileLabel;
 	addLog("send", `Code phrase: ${state.code}`);
 	if (state.files.length > 1) {
@@ -450,6 +524,9 @@ async function startReceive() {
 	$("receive-code-card").classList.add("hidden");
 	$("receive-progress-card").classList.remove("hidden");
 	$("receive-progress-card").querySelector("h2").textContent = "📥 接收文件";
+	$("receive-text-section").classList.add("hidden");
+	$("receive-text-content").textContent = "";
+	$("receive-download-section").classList.add("hidden");
 	addLog("receive", `Code phrase: ${code}`);
 
 	$("btn-start-receive").disabled = true;
@@ -640,6 +717,9 @@ async function connectAndTransfer() {
 						state.receivedFiles = [];
 						state.batchTotalChunks = 0;
 						state.batchDoneChunks = 0;
+						state.isTextPayload = false;
+						$("receive-text-section").classList.add("hidden");
+						$("receive-text-content").textContent = "";
 						if (!negotiator) {
 							negotiator = new P2pNegotiator(ws, "receiver");
 							await negotiator.start();
@@ -679,6 +759,7 @@ async function sendAllFiles(transport) {
 		"send",
 		fileCount > 1 ? `All ${fileCount} files sent` : "File transfer complete!",
 	);
+	state.textSend = false;
 }
 
 async function sendOneFile(transport, file, fileIndex, fileCount, batchTotalChunks) {
@@ -701,6 +782,7 @@ async function sendOneFile(transport, file, fileIndex, fileCount, batchTotalChun
 			fileIndex,
 			fileCount,
 			batchTotalChunks,
+			...(state.textSend || file.type === "text/plain" ? { kind: "text" } : {}),
 		}),
 	);
 	const metadataEnc = await wasmCall("wasmEncrypt", keyBytes, null, metadataBytes);
@@ -802,7 +884,23 @@ function renderDownloadList() {
 
 async function finishCurrentFile() {
 	const metadata = state.receivedMetadata;
-	if (state.streaming) {
+	if (metadata.kind === "text") {
+		const text = new TextDecoder().decode(state.merged);
+		$("receive-text-content").textContent = text;
+		$("receive-text-section").classList.remove("hidden");
+		$("btn-copy-text").onclick = () => {
+			navigator.clipboard.writeText(text).then(() => {
+				const btn = $("btn-copy-text");
+				const prev = btn.textContent;
+				btn.textContent = "✅ 已复制";
+				setTimeout(() => (btn.textContent = prev), 2000);
+			});
+		};
+		addLog(
+			"receive",
+			`Text received: ${metadata.name} (${formatSize(metadata.size)})`,
+		);
+	} else if (state.streaming) {
 		await state.writable.close();
 		state.writable = null;
 		addLog(
@@ -830,6 +928,8 @@ async function finishCurrentFile() {
 			state.fileCount > 1
 				? `✅ 已接收 ${state.fileCount} 个文件`
 				: "✅ 文件已保存到磁盘！";
+	} else if (metadata.kind === "text") {
+		$("receive-status").textContent = "✅ 文本已接收";
 	} else {
 		$("receive-status").textContent =
 			state.fileCount > 1
@@ -866,10 +966,12 @@ async function handleReceivedData(data) {
 		state.batchTotalChunks =
 			metadata.batchTotalChunks ?? metadata.chunks;
 
+		const isText = metadata.kind === "text";
+		state.isTextPayload = isText;
 		state.streaming = false;
 		state.writable = null;
 
-		if (fileIndex === 0 && fileCount > 1 && window.showDirectoryPicker) {
+		if (!isText && fileIndex === 0 && fileCount > 1 && window.showDirectoryPicker) {
 			try {
 				state.saveDir = await window.showDirectoryPicker();
 				addLog("receive", "Save directory selected for batch");
@@ -896,7 +998,7 @@ async function handleReceivedData(data) {
 			} catch (err) {
 				throw new Error(`无法写入文件 ${metadata.name}: ${err.message}`);
 			}
-		} else if (window.showSaveFilePicker) {
+		} else if (!isText && window.showSaveFilePicker) {
 			try {
 				state.fileHandle = await window.showSaveFilePicker({
 					suggestedName: metadata.name,
@@ -921,8 +1023,14 @@ async function handleReceivedData(data) {
 
 		addLog(
 			"receive",
-			`Receiving: ${metadata.name} (${formatSize(metadata.size)}), ${metadata.chunks} chunks`,
+			isText
+				? `Receiving text: ${metadata.name} (${formatSize(metadata.size)}), ${metadata.chunks} chunks`
+				: `Receiving: ${metadata.name} (${formatSize(metadata.size)}), ${metadata.chunks} chunks`,
 		);
+		if (isText) {
+			$("receive-progress-card").querySelector("h2").textContent =
+				"📥 接收文本";
+		}
 		$("receive-progress-container").classList.remove("hidden");
 		void $("receive-progress-bar").offsetWidth;
 		updateReceiveProgressUI();
