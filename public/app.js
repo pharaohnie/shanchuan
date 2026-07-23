@@ -9,6 +9,9 @@
 // Stage 2 architecture: WASM runs in a Worker so encryption never blocks the
 // main thread; sending is a pipelined (double-buffered) loop with backpressure;
 // receiving writes decrypted chunks directly into a pre-allocated buffer.
+//
+// All DOM manipulation lives in ui.js behind the `ui` facade; this file is
+// pure transfer logic and exposes `window.croc` for the UI to call into.
 
 const RELAY_URL = `ws://${window.location.host}/ws`;
 const CHUNK_SIZE = 256 * 1024; // 256KB chunks
@@ -49,13 +52,6 @@ function progressPercent(globalChunk, batchTotal) {
 	return batchTotal > 0 ? (globalChunk / batchTotal) * 100 : 100;
 }
 
-function setProgressBar(el, percent, animate = false) {
-	if (!el) return;
-	const p = Math.min(100, Math.max(0, percent)) / 100;
-	el.classList.toggle("is-complete", animate);
-	el.style.transform = `scaleX(${p})`;
-}
-
 function formatTransferProgress(
 	role,
 	fileIndex,
@@ -82,15 +78,18 @@ function updateReceiveProgressUI() {
 	const global = receiveGlobalChunk();
 	const batchTotal = state.batchTotalChunks;
 	const name = state.receivedMetadata?.name ?? "";
-	$("receive-status").textContent = formatTransferProgress(
+	ui.setStatus(
 		"receive",
-		state.fileIndex,
-		state.fileCount,
-		name,
-		global,
-		batchTotal,
+		formatTransferProgress(
+			"receive",
+			state.fileIndex,
+			state.fileCount,
+			name,
+			global,
+			batchTotal,
+		),
 	);
-	setProgressBar($("receive-progress-bar"), progressPercent(global, batchTotal));
+	ui.setProgress("receive", progressPercent(global, batchTotal));
 }
 
 // ─── State ────────────────────────────────────────────────────────────────
@@ -180,20 +179,6 @@ function wasmCall(fn, ...args) {
 	});
 }
 
-// ─── UI Elements ──────────────────────────────────────────────────────────
-const $ = (id) => document.getElementById(id);
-
-function showTab(tab) {
-	document
-		.querySelectorAll(".tab-btn")
-		.forEach((b) => b.classList.remove("active"));
-	document
-		.querySelectorAll(".tab-content")
-		.forEach((c) => c.classList.remove("active"));
-	document.querySelector(`.tab-btn[data-tab="${tab}"]`).classList.add("active");
-	document.getElementById(`tab-${tab}`).classList.add("active");
-}
-
 function formatSize(bytes) {
 	if (bytes === 0) return "0 B";
 	const units = ["B", "KB", "MB", "GB", "TB"];
@@ -201,26 +186,9 @@ function formatSize(bytes) {
 	return (bytes / 1024 ** i).toFixed(i > 0 ? 1 : 0) + " " + units[i];
 }
 
-function addLog(tab, text) {
-	const el = $(`${tab}-log`);
-	if (!el) return;
-	const ts = new Date().toLocaleTimeString();
-	el.textContent += `[${ts}] ${text}\n`;
-	el.scrollTop = el.scrollHeight;
-}
-
 function updateTransportModeUI(tab, mode) {
 	state.transportMode = mode;
-	const el = $(`${tab}-transport-mode`);
-	if (!el) return;
-	if (mode === "p2p") {
-		el.textContent = "直连 (P2P)";
-		el.className = "transport-mode transport-mode-p2p";
-	} else {
-		el.textContent = "中继转发";
-		el.className = "transport-mode transport-mode-relay";
-	}
-	el.classList.remove("hidden");
+	ui.setTransportMode(tab, mode);
 }
 
 const SIGNALING_MSG_TYPES = new Set([
@@ -320,7 +288,6 @@ async function setupRelayOnlyTransport(ws, tab, role) {
 		ws.send(JSON.stringify({ type: "transport-mode", mode: "relay" }));
 	}
 	updateTransportModeUI(tab, "relay");
-	addLog(tab, "STUN 预检未通过，跳过 P2P，使用中继");
 	return transport;
 }
 
@@ -342,12 +309,6 @@ async function setupReceiverTransport(ws, negotiator, enqueue, resolveOnce) {
 		mode === "p2p" ? p2pTransport : new RelayTransport(ws);
 	state.transport = transport;
 	updateTransportModeUI("receive", mode);
-	addLog(
-		"receive",
-		mode === "p2p"
-			? "P2P 直连已建立，等待接收文件..."
-			: "P2P 不可用，使用中继转发...",
-	);
 	bindReceiverTransport(transport, enqueue, resolveOnce);
 }
 
@@ -366,111 +327,26 @@ async function setupSenderTransport(ws, assignNegotiator, flushPendingSignaling)
 		mode === "p2p" ? p2pTransport : new RelayTransport(ws);
 	n.sendSignaling({ type: "transport-mode", mode });
 	updateTransportModeUI("send", mode);
-	addLog(
-		"send",
-		mode === "p2p" ? "P2P 直连已建立" : "P2P 不可用，使用中继转发",
-	);
 	return transport;
 }
 
 // ─── Send Flow ────────────────────────────────────────────────────────────
 const MAX_TEXT_BYTES = 1024 * 1024;
 
-function setSendMode(mode) {
-	state.sendMode = mode;
-	for (const btn of document.querySelectorAll("[data-send-mode]")) {
-		btn.classList.toggle("active", btn.dataset.sendMode === mode);
-	}
-	$("send-file-panel").classList.toggle("hidden", mode !== "file");
-	$("send-text-panel").classList.toggle("hidden", mode !== "text");
-	if (mode === "file") {
-		if (state.files.length > 0) {
-			renderSelectedFiles();
-		} else {
-			$("send-file-info").classList.add("hidden");
-		}
-	} else {
-		updateTextSendReady();
-	}
-}
-
-function prepareTextFile() {
-	const text = $("send-text-input").value;
-	if (!text.trim()) throw new Error("请输入要发送的文本");
+function prepareTextFile(text) {
+	if (!text || !text.trim()) throw new Error("请输入要发送的文本");
 	const bytes = new TextEncoder().encode(text);
 	if (bytes.length > MAX_TEXT_BYTES) throw new Error("文本超过 1MB 限制");
 	return new File([bytes], "message.txt", { type: "text/plain" });
 }
 
-function updateTextSendReady() {
-	if (state.sendMode !== "text") return;
-	const text = $("send-text-input").value;
-	const bytes = new TextEncoder().encode(text);
-	const countEl = $("send-text-count");
-	const charCount = [...text].length;
-	countEl.textContent = `${charCount} 字符`;
-	const btn = $("btn-start-send");
-	if (!text.trim()) {
-		$("send-file-info").classList.add("hidden");
-		return;
-	}
-	if (bytes.length > MAX_TEXT_BYTES) {
-		countEl.textContent = `${formatSize(bytes.length)}（超过 1MB 限制）`;
-		btn.disabled = true;
-		$("send-file-info").classList.remove("hidden");
-		return;
-	}
-	$("send-file-list").innerHTML = "";
-	$("send-file-total-size").textContent =
-		`${charCount} 字符 · ${formatSize(bytes.length)}`;
-	$("send-file-info").classList.remove("hidden");
-	btn.disabled = false;
-}
-
-function renderSelectedFiles() {
-	const list = $("send-file-list");
-	const totalEl = $("send-file-total-size");
-	list.innerHTML = "";
-	let totalBytes = 0;
-	for (const file of state.files) {
-		totalBytes += file.size;
-		const li = document.createElement("li");
-		li.className = "file-list-item";
-		const name = document.createElement("span");
-		name.className = "file-name";
-		name.textContent = file.name;
-		name.title = file.name;
-		const size = document.createElement("span");
-		size.className = "file-size";
-		size.textContent = formatSize(file.size);
-		li.append(name, size);
-		list.appendChild(li);
-	}
-	const n = state.files.length;
-	totalEl.textContent =
-		n === 1
-			? formatSize(totalBytes)
-			: `共 ${n} 个文件，${formatSize(totalBytes)}`;
-	$("send-file-info").classList.remove("hidden");
-	$("btn-start-send").disabled = false;
-}
-
-function handleFileSelect(event) {
-	const files = Array.from(event.target.files || []);
-	if (files.length === 0) return;
-	state.sendMode = "file";
-	setSendMode("file");
-	state.files = files;
-	renderSelectedFiles();
-}
-
-async function startSend() {
+async function startSend(text) {
 	if (state.sendMode === "text") {
 		try {
-			state.files = [prepareTextFile()];
+			state.files = [prepareTextFile(text)];
 			state.textSend = true;
 		} catch (err) {
-			alert(err.message);
+			ui.showError("send", err.message);
 			return;
 		}
 	} else if (state.files.length === 0) {
@@ -479,18 +355,15 @@ async function startSend() {
 		state.textSend = false;
 	}
 
-	const btn = $("btn-start-send");
-	btn.disabled = true;
-	btn.textContent = "⏳ 连接中继...";
+	ui.setBusy("send", true);
 
 	// Generate a room code
 	state.code = generateCode();
 	state.role = "sender";
 
-	// Show the code
-	$("send-code").textContent = state.code;
-	$("send-upload-card").classList.add("hidden");
-	$("send-progress-card").classList.remove("hidden");
+	// Show the code and switch to the transfer view
+	ui.setCode(state.code);
+	ui.enterTransfer("send");
 	let fileLabel;
 	if (state.textSend) {
 		fileLabel = "📤 发送文本";
@@ -499,53 +372,39 @@ async function startSend() {
 	} else {
 		fileLabel = `📤 发送 ${state.files.length} 个文件`;
 	}
-	$("send-progress-card").querySelector("h2").textContent = fileLabel;
-	addLog("send", `Code phrase: ${state.code}`);
-	if (state.files.length > 1) {
-		addLog("send", `Sending ${state.files.length} files`);
-	}
+	ui.setCardTitle("send", fileLabel);
 
 	try {
 		await connectAndTransfer();
 	} catch (err) {
-		$("send-status").textContent = `❌ ${err.message}`;
-		addLog("send", `ERROR: ${err.message}`);
+		ui.showError("send", err.message);
 	}
 }
 
 // ─── Receive Flow ─────────────────────────────────────────────────────────
-async function startReceive() {
-	const code = $("receive-code-input").value.trim();
+async function startReceive(code) {
+	code = (code || "").trim();
 	if (!code) return;
 
 	state.code = code;
 	state.role = "receiver";
 
-	$("receive-code-card").classList.add("hidden");
-	$("receive-progress-card").classList.remove("hidden");
-	$("receive-progress-card").querySelector("h2").textContent = "📥 接收文件";
-	$("receive-text-section").classList.add("hidden");
-	$("receive-text-content").textContent = "";
-	$("receive-download-section").classList.add("hidden");
-	addLog("receive", `Code phrase: ${code}`);
-
-	$("btn-start-receive").disabled = true;
-	$("btn-start-receive").textContent = "⏳ 连接中...";
+	ui.enterTransfer("receive");
+	ui.setCardTitle("receive", "📥 接收文件");
+	ui.resetReceiveView();
+	ui.setBusy("receive", true);
 
 	try {
 		await connectAndTransfer();
 	} catch (err) {
-		$("receive-status").textContent = `❌ ${err.message}`;
-		addLog("receive", `ERROR: ${err.message}`);
-		$("btn-start-receive").disabled = false;
-		$("btn-start-receive").textContent = "📥 接收文件";
+		ui.showError("receive", err.message);
+		ui.setBusy("receive", false);
 	}
 }
 
 // ─── Core Transfer Logic ──────────────────────────────────────────────────
 async function connectAndTransfer() {
 	return new Promise((resolve, reject) => {
-		addLog(state.role, "Connecting to relay...");
 		const ws = new WebSocket(RELAY_URL);
 		ws.binaryType = "arraybuffer"; // receive binary as ArrayBuffer (no FileReader)
 		state.ws = ws;
@@ -594,7 +453,6 @@ async function connectAndTransfer() {
 		};
 
 		ws.onopen = () => {
-			addLog(state.role, "Connected to relay, joining room...");
 			ws.send(JSON.stringify({ type: "join", room: state.code }));
 		};
 
@@ -604,13 +462,11 @@ async function connectAndTransfer() {
 					const msg = JSON.parse(event.data);
 					if (msg.type === "waiting") {
 						pakeState = "waiting";
-						addLog(state.role, "Waiting for peer to connect...");
 						if (state.role === "sender") {
-							$("send-status").textContent = "⏳ 等待接收方输入口令码...";
+							ui.setStatus("send", "⏳ 等待接收方输入口令码...");
 						}
 					} else if (msg.type === "paired") {
 						pakeState = "paired";
-						addLog(state.role, `Connected as ${state.role}! Starting PAKE...`);
 						enqueue(() => runPAKEInit());
 					} else if (isSignalingMessage(msg)) {
 						handleSignaling(msg);
@@ -639,7 +495,6 @@ async function connectAndTransfer() {
 		ws.onerror = () => rejectOnce(new Error("WebSocket error"));
 
 		ws.onclose = async (event) => {
-			addLog(state.role, `WebSocket closed (code: ${event.code})`);
 			try {
 				await chain;
 			} catch {
@@ -656,18 +511,13 @@ async function connectAndTransfer() {
 
 		// ─── PAKE init (sender sends the first PAKE message) ───────────────
 		async function runPAKEInit() {
-			if (state.role === "sender") {
-				$("send-status").textContent = "🔐 正在协商加密密钥...";
-			} else {
-				$("receive-status").textContent = "🔐 正在协商加密密钥...";
-			}
+			ui.setStatus(state.role === "sender" ? "send" : "receive", "🔐 正在协商加密密钥...");
 			const role = state.role === "sender" ? 0 : 1;
 			await wasmCall("wasmInitPAKE", role, state.code);
 			pakeState = "pake";
 			if (state.role === "sender") {
 				const result = await wasmCall("wasmGetPAKEMessage");
 				ws.send(new TextEncoder().encode(result.message));
-				addLog(state.role, "PAKE message sent");
 			}
 		}
 
@@ -678,18 +528,15 @@ async function connectAndTransfer() {
 				const result = await wasmCall("wasmProcessPAKEMessage", msgStr);
 				if (result.message) {
 					ws.send(new TextEncoder().encode(result.message));
-					addLog(state.role, "PAKE response sent");
 				}
 				if (result.complete) {
 					pakeState = "complete";
 					const keyResult = await wasmCall("wasmGetSessionKey");
 					state.sessionKey = keyResult.key;
 					state.sessionKeyBytes = base64ToUint8Array(keyResult.key);
-					addLog(state.role, "PAKE complete! Shared key established.");
 
 					if (state.role === "sender") {
-						$("send-status").textContent =
-							"🔑 密钥已建立，协商 P2P 连接...";
+						ui.setStatus("send", "🔑 密钥已建立，协商 P2P 连接...");
 						const transport = await setupSenderTransport(
 							ws,
 							(n) => {
@@ -697,14 +544,12 @@ async function connectAndTransfer() {
 							},
 							flushPendingSignaling,
 						);
-						$("send-status").textContent =
-							"🔑 密钥已建立，开始发送文件...";
+						ui.setStatus("send", "🔑 密钥已建立，开始发送文件...");
 						await sendAllFiles(transport);
 						resolveOnce();
 						ws.close();
 					} else {
-						$("receive-status").textContent =
-							"🔑 密钥已建立，协商 P2P 连接...";
+						ui.setStatus("receive", "🔑 密钥已建立，协商 P2P 连接...");
 						state._metadataReceived = false;
 						state.merged = null;
 						state.mergeOffset = 0;
@@ -718,8 +563,7 @@ async function connectAndTransfer() {
 						state.batchTotalChunks = 0;
 						state.batchDoneChunks = 0;
 						state.isTextPayload = false;
-						$("receive-text-section").classList.add("hidden");
-						$("receive-text-content").textContent = "";
+						ui.resetReceiveView();
 						if (!negotiator) {
 							negotiator = new P2pNegotiator(ws, "receiver");
 							await negotiator.start();
@@ -748,17 +592,19 @@ async function sendAllFiles(transport) {
 	const files = state.files;
 	const fileCount = files.length;
 	const batchTotalChunks = batchTotalChunksForFiles(files, transport);
-	setProgressBar($("send-progress-bar"), 0);
+	ui.setProgress("send", 0);
 	for (let i = 0; i < fileCount; i++) {
 		await sendOneFile(transport, files[i], i, fileCount, batchTotalChunks);
 	}
-	$("send-status").textContent =
-		fileCount > 1 ? `✅ ${fileCount} 个文件发送完成！` : "✅ 文件发送完成！";
-	setProgressBar($("send-progress-bar"), 100, true);
-	addLog(
+	ui.setStatus(
 		"send",
-		fileCount > 1 ? `All ${fileCount} files sent` : "File transfer complete!",
+		state.textSend
+			? "✅ 文本发送完成！"
+			: fileCount > 1
+				? `✅ ${fileCount} 个文件发送完成！`
+				: "✅ 文件发送完成！",
 	);
+	ui.setProgress("send", 100, true);
 	state.textSend = false;
 }
 
@@ -769,11 +615,6 @@ async function sendOneFile(transport, file, fileIndex, fileCount, batchTotalChun
 	state.currentChunk = 0;
 	const keyBytes = state.sessionKeyBytes;
 
-	addLog(
-		"send",
-		`File ${fileIndex + 1}/${fileCount}: ${file.name}, Size: ${formatSize(file.size)}, Chunks: ${totalChunks}`,
-	);
-
 	const metadataBytes = new TextEncoder().encode(
 		JSON.stringify({
 			name: file.name,
@@ -782,12 +623,11 @@ async function sendOneFile(transport, file, fileIndex, fileCount, batchTotalChun
 			fileIndex,
 			fileCount,
 			batchTotalChunks,
-			...(state.textSend || file.type === "text/plain" ? { kind: "text" } : {}),
+			...(state.textSend ? { kind: "text" } : {}),
 		}),
 	);
 	const metadataEnc = await wasmCall("wasmEncrypt", keyBytes, null, metadataBytes);
 	transport.send(metadataEnc);
-	addLog("send", "Metadata sent");
 
 	const updateSendProgress = (chunkInFile) => {
 		const global = batchGlobalChunks(
@@ -796,33 +636,18 @@ async function sendOneFile(transport, file, fileIndex, fileCount, batchTotalChun
 			state.files,
 			transport,
 		);
-		$("send-status").textContent = formatTransferProgress(
+		ui.setStatus(
 			"send",
-			fileIndex,
-			fileCount,
-			file.name,
-			global,
-			batchTotalChunks,
+			formatTransferProgress(
+				"send",
+				fileIndex,
+				fileCount,
+				file.name,
+				global,
+				batchTotalChunks,
+			),
 		);
-		setProgressBar(
-			$("send-progress-bar"),
-			progressPercent(global, batchTotalChunks),
-		);
-	};
-
-	const logSendChunk = (chunkInFile) => {
-		const global = batchGlobalChunks(
-			fileIndex,
-			chunkInFile,
-			state.files,
-			transport,
-		);
-		const fileNote =
-			fileCount > 1 ? ` (file ${fileIndex + 1}/${fileCount})` : "";
-		addLog(
-			"send",
-			`Chunk ${global}/${batchTotalChunks} sent${fileNote}`,
-		);
+		ui.setProgress("send", progressPercent(global, batchTotalChunks));
 	};
 
 	updateSendProgress(0);
@@ -859,62 +684,22 @@ async function sendOneFile(transport, file, fileIndex, fileCount, batchTotalChun
 
 		state.currentChunk = i + 1;
 		updateSendProgress(i + 1);
-		logSendChunk(i + 1);
 	}
 }
 
 // ─── Receiver: File Reception ──────────────────────────────────────────────
-function renderDownloadList() {
-	const list = $("receive-download-list");
-	list.innerHTML = "";
-	for (const f of state.receivedFiles) {
-		const btn = document.createElement("button");
-		btn.className = "btn btn-success";
-		btn.textContent = `⬇️ ${f.name}`;
-		btn.onclick = () => {
-			const a = document.createElement("a");
-			a.href = f.url;
-			a.download = f.name;
-			a.click();
-		};
-		list.appendChild(btn);
-	}
-	$("receive-download-section").classList.remove("hidden");
-}
-
 async function finishCurrentFile() {
 	const metadata = state.receivedMetadata;
 	if (metadata.kind === "text") {
 		const text = new TextDecoder().decode(state.merged);
-		$("receive-text-content").textContent = text;
-		$("receive-text-section").classList.remove("hidden");
-		$("btn-copy-text").onclick = () => {
-			navigator.clipboard.writeText(text).then(() => {
-				const btn = $("btn-copy-text");
-				const prev = btn.textContent;
-				btn.textContent = "✅ 已复制";
-				setTimeout(() => (btn.textContent = prev), 2000);
-			});
-		};
-		addLog(
-			"receive",
-			`Text received: ${metadata.name} (${formatSize(metadata.size)})`,
-		);
+		ui.showReceivedText(text);
 	} else if (state.streaming) {
 		await state.writable.close();
 		state.writable = null;
-		addLog(
-			"receive",
-			`File saved: ${metadata.name} (${formatSize(metadata.size)})`,
-		);
 	} else {
 		const blob = new Blob([state.merged]);
 		const url = URL.createObjectURL(blob);
 		state.receivedFiles.push({ name: metadata.name, url });
-		addLog(
-			"receive",
-			`File received: ${metadata.name} (${formatSize(metadata.size)})`,
-		);
 	}
 
 	if (state.fileIndex < state.fileCount - 1) {
@@ -924,20 +709,24 @@ async function finishCurrentFile() {
 	}
 
 	if (state.streaming) {
-		$("receive-status").textContent =
+		ui.setStatus(
+			"receive",
 			state.fileCount > 1
 				? `✅ 已接收 ${state.fileCount} 个文件`
-				: "✅ 文件已保存到磁盘！";
+				: "✅ 文件已保存到磁盘！",
+		);
 	} else if (metadata.kind === "text") {
-		$("receive-status").textContent = "✅ 文本已接收";
+		ui.setStatus("receive", "✅ 文本已接收");
 	} else {
-		$("receive-status").textContent =
+		ui.setStatus(
+			"receive",
 			state.fileCount > 1
 				? `✅ 已接收 ${state.fileCount} 个文件`
-				: "✅ 文件接收完成！";
-		renderDownloadList();
+				: "✅ 文件接收完成！",
+		);
+		ui.showDownloads(state.receivedFiles);
 	}
-	setProgressBar($("receive-progress-bar"), 100, true);
+	ui.setProgress("receive", 100, true);
 	return true;
 }
 
@@ -974,15 +763,10 @@ async function handleReceivedData(data) {
 		if (!isText && fileIndex === 0 && fileCount > 1 && window.showDirectoryPicker) {
 			try {
 				state.saveDir = await window.showDirectoryPicker();
-				addLog("receive", "Save directory selected for batch");
 			} catch (err) {
 				if (err.name === "AbortError") {
 					throw new Error("用户取消了保存位置选择");
 				}
-				addLog(
-					"receive",
-					`Directory picker unavailable: ${err.message}`,
-				);
 			}
 		}
 
@@ -994,7 +778,6 @@ async function handleReceivedData(data) {
 				);
 				state.writable = await state.fileHandle.createWritable();
 				state.streaming = true;
-				addLog("receive", "Streaming to disk (File System Access API)");
 			} catch (err) {
 				throw new Error(`无法写入文件 ${metadata.name}: ${err.message}`);
 			}
@@ -1005,15 +788,10 @@ async function handleReceivedData(data) {
 				});
 				state.writable = await state.fileHandle.createWritable();
 				state.streaming = true;
-				addLog("receive", "Streaming to disk (File System Access API)");
 			} catch (err) {
 				if (err.name === "AbortError") {
 					throw new Error("用户取消了保存位置选择");
 				}
-				addLog(
-					"receive",
-					`File System API unavailable, buffering in memory: ${err.message}`,
-				);
 			}
 		}
 		if (!state.streaming) {
@@ -1021,18 +799,10 @@ async function handleReceivedData(data) {
 			state.mergeOffset = 0;
 		}
 
-		addLog(
-			"receive",
-			isText
-				? `Receiving text: ${metadata.name} (${formatSize(metadata.size)}), ${metadata.chunks} chunks`
-				: `Receiving: ${metadata.name} (${formatSize(metadata.size)}), ${metadata.chunks} chunks`,
-		);
 		if (isText) {
-			$("receive-progress-card").querySelector("h2").textContent =
-				"📥 接收文本";
+			ui.setCardTitle("receive", "📥 接收文本");
 		}
-		$("receive-progress-container").classList.remove("hidden");
-		void $("receive-progress-bar").offsetWidth;
+		ui.showProgressBar("receive");
 		updateReceiveProgressUI();
 
 		if (metadata.chunks === 0) {
@@ -1050,27 +820,9 @@ async function handleReceivedData(data) {
 	state.currentChunk++;
 
 	updateReceiveProgressUI();
-	const global = receiveGlobalChunk();
-	const fileNote =
-		state.fileCount > 1
-			? ` (file ${state.fileIndex + 1}/${state.fileCount})`
-			: "";
-	addLog(
-		"receive",
-		`Chunk ${global}/${state.batchTotalChunks} received${fileNote}`,
-	);
 
 	if (state.currentChunk >= state.totalChunks) {
 		await finishCurrentFile();
-	}
-}
-
-function downloadReceivedFile() {
-	for (const f of state.receivedFiles) {
-		const a = document.createElement("a");
-		a.href = f.url;
-		a.download = f.name;
-		a.click();
 	}
 }
 
@@ -1259,20 +1011,19 @@ function encodeSeq(n) {
 	return aad;
 }
 
-function copyCode() {
-	const code = $("send-code").textContent;
-	navigator.clipboard.writeText(code).then(() => {
-		const btn = document.querySelector(".btn-small");
-		btn.textContent = "✅ 已复制";
-		setTimeout(() => (btn.textContent = "📋 复制"), 2000);
-	});
-}
-
-// ─── Initialization ───────────────────────────────────────────────────────
-document.addEventListener("DOMContentLoaded", () => {
-	// WASM loads in the worker (started at module load). Show UI immediately;
-	// the first wasmCall awaits worker readiness if needed.
-	document.querySelector(".loading-overlay")?.remove();
-	$("app-content").classList.remove("hidden");
-	startStunPrecheck();
-});
+// ─── UI-facing API ────────────────────────────────────────────────────────
+// ui.js binds all DOM events to these; `state` is exposed read-only.
+window.croc = {
+	setFiles(files) {
+		state.sendMode = "file";
+		state.files = files;
+	},
+	setSendMode(mode) {
+		state.sendMode = mode;
+	},
+	startSend,
+	startReceive,
+	startStunPrecheck,
+	MAX_TEXT_BYTES,
+	state,
+};

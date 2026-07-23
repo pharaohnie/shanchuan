@@ -11,53 +11,40 @@
     />
   </head>
   <body>
+    <canvas id="bg-canvas"></canvas>
+
     <div class="loading-overlay" id="loading-overlay">
       <div class="loading-spinner"></div>
       <p>正在加载加密模块...</p>
     </div>
 
-    <div class="app-container" id="app-content">
+    <main class="app hidden" id="app-content">
       <header class="app-header">
         <div class="logo">
           <span class="logo-icon">🐊</span>
           <h1>Croc WASM</h1>
         </div>
-        <p class="subtitle">
-          基于 PAKE 的浏览器端到端加密文件传输 · 文件不经过服务器
-        </p>
-        <div class="badge-container">
-          <span class="badge badge-green">纯浏览器端</span>
-          <span class="badge badge-blue">端到端加密</span>
-          <span class="badge badge-purple">Go WASM</span>
-        </div>
+        <p class="subtitle">端到端加密 · 浏览器到浏览器直传</p>
       </header>
 
-      <div class="tab-bar">
-        <button
-          class="tab-btn active"
-          data-tab="send"
-          onclick="showTab('send')"
-        >
-          <span class="tab-icon">📤</span> 发送文件
+      <div class="segmented">
+        <div class="segmented-thumb"></div>
+        <button type="button" class="segmented-btn active" data-view="send">
+          📤 发送
         </button>
-        <button class="tab-btn" data-tab="receive" onclick="showTab('receive')">
-          <span class="tab-icon">📥</span> 接收文件
-        </button>
-        <button class="tab-btn" data-tab="info" onclick="showTab('info')">
-          <span class="tab-icon">ℹ️</span> 原理
+        <button type="button" class="segmented-btn" data-view="receive">
+          📥 接收
         </button>
       </div>
 
-      <!-- ========== SEND TAB ========== -->
-      <div id="tab-send" class="tab-content active">
+      <!-- ========== SEND VIEW ========== -->
+      <section id="view-send" class="view active">
         <div class="card" id="send-upload-card">
-          <h2>选择要发送的内容</h2>
           <div class="send-mode-bar">
             <button
               type="button"
               class="send-mode-btn active"
               data-send-mode="file"
-              onclick="setSendMode('file')"
             >
               文件
             </button>
@@ -65,98 +52,74 @@
               type="button"
               class="send-mode-btn"
               data-send-mode="text"
-              onclick="setSendMode('text')"
             >
               文本
             </button>
           </div>
+
           <div id="send-file-panel">
-          <div class="drop-zone" id="drop-zone">
-            <div class="drop-zone-content">
+            <div class="drop-zone" id="drop-zone">
               <span class="drop-icon">📁</span>
-              <p>
-                文件直接通过浏览器加密发送，<strong>不经过任何服务器</strong>
-              </p>
-              <input
-                type="file"
-                id="file-input"
-                multiple
-                onchange="handleFileSelect(event)"
-                hidden
-              />
-              <button
-                class="btn btn-secondary"
-                onclick="document.getElementById('file-input').click()"
-              >
-                选择文件（可多选）
-              </button>
+              <p class="drop-title">拖拽文件到这里，或点击选择</p>
+              <p class="drop-hint">支持多选 · 加密直传，不经过服务器</p>
+              <input type="file" id="file-input" multiple hidden />
             </div>
           </div>
-          </div>
+
           <div id="send-text-panel" class="hidden">
             <textarea
               id="send-text-input"
               class="text-input-area"
               placeholder="输入要发送的文本..."
-              oninput="updateTextSendReady()"
             ></textarea>
             <span id="send-text-count" class="text-char-count">0 字符</span>
           </div>
+
           <div id="send-file-info" class="file-info hidden">
-            <div class="file-detail">
-              <ul id="send-file-list" class="file-list"></ul>
-              <span class="file-size" id="send-file-total-size"></span>
+            <ul id="send-file-list" class="file-list"></ul>
+            <div class="file-info-footer">
+              <span class="file-total" id="send-file-total-size"></span>
+              <button class="btn btn-primary" id="btn-start-send">
+                🚀 开始发送
+              </button>
             </div>
-            <button
-              class="btn btn-primary"
-              id="btn-start-send"
-              onclick="startSend()"
-            >
-              🚀 开始发送
-            </button>
           </div>
         </div>
 
         <div id="send-progress-card" class="card hidden">
           <h2>📤 发送文件</h2>
-          <div class="status-display">
-            <div class="code-display" id="send-code-display">
-              <label>口令码（分享给接收方）</label>
+          <div class="code-display">
+            <label>口令码（分享给接收方）</label>
+            <div class="code-row">
               <div class="code-value" id="send-code"></div>
-              <button class="btn btn-small" onclick="copyCode()">
+              <button type="button" class="btn btn-small" id="btn-copy-code">
                 📋 复制
               </button>
             </div>
-            <div class="status-message" id="send-status">等待中...</div>
-            <div id="send-transport-mode" class="transport-mode hidden"></div>
-            <div class="progress-bar-container" id="send-progress-container">
-              <div class="progress-bar" id="send-progress-bar"></div>
-            </div>
-            <div class="log-output" id="send-log"></div>
+          </div>
+          <div class="status-message" id="send-status">连接中...</div>
+          <div id="send-transport-mode" class="transport-mode hidden"></div>
+          <div class="progress-bar-container" id="send-progress-container">
+            <div class="progress-bar" id="send-progress-bar"></div>
           </div>
         </div>
-      </div>
+      </section>
 
-      <!-- ========== RECEIVE TAB ========== -->
-      <div id="tab-receive" class="tab-content">
+      <!-- ========== RECEIVE VIEW ========== -->
+      <section id="view-receive" class="view">
         <div class="card" id="receive-code-card">
           <h2>输入口令码</h2>
-          <p class="help-text">
-            输入发送方分享给你的口令码，直接浏览器到浏览器传输
-          </p>
+          <p class="help-text">输入发送方分享的口令码，即可开始接收</p>
           <div class="code-input-group">
             <input
               type="text"
               id="receive-code-input"
               placeholder="例如: swift-falcon-tiger-42"
               class="code-input"
-              onkeydown="if (event.key === 'Enter') startReceive();"
+              autocomplete="off"
+              spellcheck="false"
             />
-            <button
-              class="btn btn-primary"
-              id="btn-start-receive"
-              onclick="startReceive()"
-            >
+            <button class="btn btn-primary" id="btn-start-receive">
               📥 接收文件
             </button>
           </div>
@@ -164,109 +127,25 @@
 
         <div id="receive-progress-card" class="card hidden">
           <h2>📥 接收文件</h2>
-          <div class="status-display">
-            <div class="status-message" id="receive-status">连接中...</div>
-            <div id="receive-transport-mode" class="transport-mode hidden"></div>
-            <div
-              class="progress-bar-container hidden"
-              id="receive-progress-container"
-            >
-              <div class="progress-bar" id="receive-progress-bar"></div>
-            </div>
-            <div class="log-output" id="receive-log"></div>
-            <div id="receive-text-section" class="hidden">
-              <pre id="receive-text-content" class="receive-text-content"></pre>
-              <button
-                type="button"
-                class="btn btn-secondary"
-                id="btn-copy-text"
-              >
-                复制文本
-              </button>
-            </div>
-            <div id="receive-download-section" class="hidden download-section">
-              <div id="receive-download-list" class="download-list"></div>
-            </div>
+          <div class="status-message" id="receive-status">连接中...</div>
+          <div id="receive-transport-mode" class="transport-mode hidden"></div>
+          <div
+            class="progress-bar-container hidden"
+            id="receive-progress-container"
+          >
+            <div class="progress-bar" id="receive-progress-bar"></div>
+          </div>
+          <div id="receive-text-section" class="hidden">
+            <pre id="receive-text-content" class="receive-text-content"></pre>
+            <button type="button" class="btn btn-secondary" id="btn-copy-text">
+              复制文本
+            </button>
+          </div>
+          <div id="receive-download-section" class="hidden download-section">
+            <div id="receive-download-list" class="download-list"></div>
           </div>
         </div>
-      </div>
-
-      <!-- ========== INFO TAB ========== -->
-      <div id="tab-info" class="tab-content">
-        <div class="card">
-          <h2>🐊 Croc WASM 工作原理</h2>
-          <div class="info-diagram">
-            <pre>
-  浏览器发送方 ══WebRTC P2P══ 浏览器接收方  （优先，Cloudflare STUN 打洞）
-        │                                              │
-        │  失败时回退：WebSocket ──→ [中继] ←── WebSocket
-        │  PAKE 密钥交换 + AES-GCM 端到端加密（密文不经服务器解密）
-            </pre>
-          </div>
-          <div class="info-steps">
-            <div class="info-step">
-              <span class="step-number">1</span>
-              <div>
-                <strong>PAKE 密钥交换</strong>
-                <p>
-                  发送方和接收方使用相同的口令码，通过 SPAKE2
-                  协议在浏览器中协商出共享密钥。<br />
-                  <span class="info-note">中继服务器无法得知密钥内容</span>
-                </p>
-              </div>
-            </div>
-            <div class="info-step">
-              <span class="step-number">2</span>
-              <div>
-                <strong>WebRTC P2P 直连</strong>
-                <p>
-                  密钥建立后，双方通过 Cloudflare STUN 尝试浏览器间直连（WebRTC
-                  DataChannel）。成功时文件密文不经中继服务器。<br />
-                  <span class="info-note"
-                    >NAT 复杂时自动回退 WebSocket 中继转发</span
-                  >
-                </p>
-              </div>
-            </div>
-            <div class="info-step">
-              <span class="step-number">3</span>
-              <div>
-                <strong>端到端加密</strong>
-                <p>
-                  文件在发送方浏览器中用 AES-256-GCM
-                  加密，接收方浏览器解密。<br />
-                  <span class="info-note"
-                    >中继服务器只能看到密文，无法解密文件内容</span
-                  >
-                </p>
-              </div>
-            </div>
-            <div class="info-step">
-              <span class="step-number">4</span>
-              <div>
-                <strong>Go WASM 核心</strong>
-                <p>
-                  PAKE 和加密逻辑由 Go 编译为 WebAssembly
-                  在浏览器中运行，性能接近原生。<br />
-                  <span class="info-note"
-                    >基于 croc 的 schollz/pake 和 golang.org/x/crypto</span
-                  >
-                </p>
-              </div>
-            </div>
-          </div>
-          <div class="info-tech">
-            <h3>技术栈</h3>
-            <div class="tech-tags">
-              <span class="tech-tag">Go WASM</span>
-              <span class="tech-tag">SPAKE2 PAKE</span>
-              <span class="tech-tag">AES-256-GCM</span>
-              <span class="tech-tag">WebRTC P2P</span>
-              <span class="tech-tag">WebSocket</span>
-            </div>
-          </div>
-        </div>
-      </div>
+      </section>
 
       <footer class="app-footer">
         <p>
@@ -275,10 +154,19 @@
           Go WASM 端到端加密 · 开源 MIT
         </p>
       </footer>
-    </div>
+    </main>
 
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js"
+        }
+      }
+    </script>
     <script src="/transport.js"></script>
     <script src="/p2p.js"></script>
     <script src="/app.js"></script>
+    <script src="/ui.js"></script>
+    <script type="module" src="/bg.js"></script>
   </body>
 </html>
