@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>🐊 Croc WASM - 浏览器端到端加密文件传输</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐊</text></svg>"
+    />
+    <script src="/wasm_exec.js"></script>
+  </head>
+  <body>
+    <div class="loading-overlay" id="loading-overlay">
+      <div class="loading-spinner"></div>
+      <p>正在加载加密模块...</p>
+    </div>
+
+    <div class="app-container" id="app-content">
+      <header class="app-header">
+        <div class="logo">
+          <span class="logo-icon">🐊</span>
+          <h1>Croc WASM</h1>
+        </div>
+        <p class="subtitle">
+          基于 PAKE 的浏览器端到端加密文件传输 · 文件不经过服务器
+        </p>
+        <div class="badge-container">
+          <span class="badge badge-green">纯浏览器端</span>
+          <span class="badge badge-blue">端到端加密</span>
+          <span class="badge badge-purple">Go WASM</span>
+        </div>
+      </header>
+
+      <div class="tab-bar">
+        <button
+          class="tab-btn active"
+          data-tab="send"
+          onclick="showTab('send')"
+        >
+          <span class="tab-icon">📤</span> 发送文件
+        </button>
+        <button class="tab-btn" data-tab="receive" onclick="showTab('receive')">
+          <span class="tab-icon">📥</span> 接收文件
+        </button>
+        <button class="tab-btn" data-tab="info" onclick="showTab('info')">
+          <span class="tab-icon">ℹ️</span> 原理
+        </button>
+      </div>
+
+      <!-- ========== SEND TAB ========== -->
+      <div id="tab-send" class="tab-content active">
+        <div class="card" id="send-upload-card">
+          <h2>选择要发送的文件</h2>
+          <div class="drop-zone" id="drop-zone">
+            <div class="drop-zone-content">
+              <span class="drop-icon">📁</span>
+              <p>
+                文件直接通过浏览器加密发送，<strong>不经过任何服务器</strong>
+              </p>
+              <input
+                type="file"
+                id="file-input"
+                onchange="handleFileSelect(event)"
+                hidden
+              />
+              <button
+                class="btn btn-secondary"
+                onclick="document.getElementById('file-input').click()"
+              >
+                选择文件
+              </button>
+            </div>
+          </div>
+          <div id="send-file-info" class="file-info hidden">
+            <div class="file-detail">
+              <span class="file-name" id="send-file-name"></span>
+              <span class="file-size" id="send-file-size"></span>
+            </div>
+            <button
+              class="btn btn-primary"
+              id="btn-start-send"
+              onclick="startSend()"
+            >
+              🚀 开始发送
+            </button>
+          </div>
+        </div>
+
+        <div id="send-progress-card" class="card hidden">
+          <h2>📤 发送文件</h2>
+          <div class="status-display">
+            <div class="code-display" id="send-code-display">
+              <label>口令码（分享给接收方）</label>
+              <div class="code-value" id="send-code"></div>
+              <button class="btn btn-small" onclick="copyCode()">
+                📋 复制
+              </button>
+            </div>
+            <div class="status-message" id="send-status">等待中...</div>
+            <div class="progress-bar-container" id="send-progress-container">
+              <div class="progress-bar" id="send-progress-bar"></div>
+            </div>
+            <div class="log-output" id="send-log"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ========== RECEIVE TAB ========== -->
+      <div id="tab-receive" class="tab-content">
+        <div class="card" id="receive-code-card">
+          <h2>输入口令码</h2>
+          <p class="help-text">
+            输入发送方分享给你的口令码，直接浏览器到浏览器传输
+          </p>
+          <div class="code-input-group">
+            <input
+              type="text"
+              id="receive-code-input"
+              placeholder="例如: swift-falcon-tiger-42"
+              class="code-input"
+              onkeydown="if (event.key === 'Enter') startReceive();"
+            />
+            <button
+              class="btn btn-primary"
+              id="btn-start-receive"
+              onclick="startReceive()"
+            >
+              📥 接收文件
+            </button>
+          </div>
+        </div>
+
+        <div id="receive-progress-card" class="card hidden">
+          <h2>📥 接收文件</h2>
+          <div class="status-display">
+            <div class="status-message" id="receive-status">连接中...</div>
+            <div
+              class="progress-bar-container hidden"
+              id="receive-progress-container"
+            >
+              <div class="progress-bar" id="receive-progress-bar"></div>
+            </div>
+            <div class="log-output" id="receive-log"></div>
+            <div id="receive-download-section" class="hidden download-section">
+              <button
+                class="btn btn-success"
+                id="btn-download"
+                onclick="downloadReceivedFile()"
+              >
+                ⬇️ 下载文件
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ========== INFO TAB ========== -->
+      <div id="tab-info" class="tab-content">
+        <div class="card">
+          <h2>🐊 Croc WASM 工作原理</h2>
+          <div class="info-diagram">
+            <pre>
+  浏览器发送方 ──WebSocket──→ [中继] ←──WebSocket── 浏览器接收方
+        │  PAKE 密钥交换          │         PAKE 密钥交换  │
+        │  AES-GCM 加密          │         AES-GCM 解密  │
+        └────────── 端到端加密文件数据 ──────────────────┘
+          </pre>
+          </div>
+          <div class="info-steps">
+            <div class="info-step">
+              <span class="step-number">1</span>
+              <div>
+                <strong>PAKE 密钥交换</strong>
+                <p>
+                  发送方和接收方使用相同的口令码，通过 SPAKE2
+                  协议在浏览器中协商出共享密钥。<br />
+                  <span class="info-note">中继服务器无法得知密钥内容</span>
+                </p>
+              </div>
+            </div>
+            <div class="info-step">
+              <span class="step-number">2</span>
+              <div>
+                <strong>端到端加密</strong>
+                <p>
+                  文件在发送方浏览器中用 AES-256-GCM
+                  加密，密文通过中继传输，接收方浏览器解密。<br />
+                  <span class="info-note"
+                    >中继服务器只能看到密文，无法解密文件内容</span
+                  >
+                </p>
+              </div>
+            </div>
+            <div class="info-step">
+              <span class="step-number">3</span>
+              <div>
+                <strong>Go WASM 核心</strong>
+                <p>
+                  PAKE 和加密逻辑由 Go 编译为 WebAssembly
+                  在浏览器中运行，性能接近原生。<br />
+                  <span class="info-note"
+                    >基于 croc 的 schollz/pake 和 golang.org/x/crypto</span
+                  >
+                </p>
+              </div>
+            </div>
+          </div>
+          <div class="info-tech">
+            <h3>技术栈</h3>
+            <div class="tech-tags">
+              <span class="tech-tag">Go WASM</span>
+              <span class="tech-tag">SPAKE2 PAKE</span>
+              <span class="tech-tag">AES-256-GCM</span>
+              <span class="tech-tag">WebSocket</span>
+              <span class="tech-tag">Web Crypto API</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <footer class="app-footer">
+        <p>
+          Powered by
+          <a href="https://github.com/schollz/croc" target="_blank">croc</a> ·
+          Go WASM 端到端加密 · 开源 MIT
+        </p>
+      </footer>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

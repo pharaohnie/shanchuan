@@ -1,0 +1,8 @@
+filippo.io/edwards25519 v1.2.0 h1:crnVqOiS4jqYleHd9vaKZ+HKtHfllngJIiOpNpoJsjo=
+filippo.io/edwards25519 v1.2.0/go.mod h1:xzAOLCNug/yB62zG1bQ8uziwrIqIuxhctzJT18Q77mc=
+github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aNNg=
+github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
+github.com/schollz/pake/v3 v3.1.1 h1:lyoU5uNQ3thfjEzrahgxWWBm6+pbI1F2KAZ3gs6LIV8=
+github.com/schollz/pake/v3 v3.1.1/go.mod h1:420+m3AakXcS0n7Uwc7eRs2CosQ2YfE/vKcIkilvqZc=
+github.com/tscholl2/siec v0.0.0-20240310163802-c2c6f6198406 h1:sDWDZkwYqX0jvLWstKzFwh+pYhQNaVg65BgSkCP/f7U=
+github.com/tscholl2/siec v0.0.0-20240310163802-c2c6f6198406/go.mod h1:KL9+ubr1JZdaKjgAaHr+tCytEncXBa1pR6FjbTsOJnw=
