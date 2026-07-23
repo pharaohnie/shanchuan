@@ -1,6 +1,6 @@
 // bg.js — Three.js 数据粒子流背景
 // 暴露 window.bgFX = { setTransferring(b), setProgress(p 0-100), setDirection(±1) }
-// 发送：粒子左→右；接收：右→左；传输中流速加快、亮度提升。
+// 发送：粒子左→右；接收：右→左；传输中进度越高流速越快（二次加速）、亮度提升。
 // 背景加载失败时不挂 bgFX，调用方一律可选链，功能不受影响。
 
 import * as THREE from "three";
@@ -23,6 +23,7 @@ if (renderer) {
   const isMobile =
     window.matchMedia("(pointer: coarse)").matches || window.innerWidth < 768;
   const PARTICLE_COUNT = isMobile ? 700 : 1600;
+  const MAX_FLOW_BOOST = 4; // 传输完成时流速倍率：1 + 1² × 4 = 5x
   const reducedMotion = window.matchMedia(
     "(prefers-reduced-motion: reduce)",
   ).matches;
@@ -128,8 +129,9 @@ if (renderer) {
     const dt = Math.min(clock.getDelta(), 0.05);
     const k = 1 - Math.pow(0.002, dt); // 帧率无关的平滑系数
 
-    // 传输中流速 1 → 1 + p×2.5，空闲回落到 1
-    const flowTarget = target.transferring ? 1 + target.progress * 2.5 : 1;
+    // 传输中流速 1 → 1 + p²×MAX_FLOW_BOOST（二次加速），空闲回落到 1
+    const p = target.progress;
+    const flowTarget = target.transferring ? 1 + p * p * MAX_FLOW_BOOST : 1;
     current.flow += (flowTarget - current.flow) * k;
     current.dir += (target.dir - current.dir) * k;
     const brightTarget = target.transferring ? 1 : 0;
