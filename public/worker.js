@@ -8,27 +8,49 @@ let goInstance = null;
 let wasmReady = false;
 let wasmLoading = null;
 
+const WASM_LOAD_TIMEOUT_MS = 30000;
+
+// Poll until Go main() has registered the exported functions on self.
+async function waitForWasmExports() {
+	const deadline = Date.now() + WASM_LOAD_TIMEOUT_MS;
+	while (typeof self.wasmEncrypt !== "function") {
+		if (Date.now() > deadline) {
+			throw new Error(
+				"WASM module failed to register exports within 30s",
+			);
+		}
+		await new Promise((r) => setTimeout(r, 2));
+	}
+}
+
 // Load + instantiate the Go WASM module, then wait for main() to finish
 // registering exported functions (it ends in select{} and never returns).
 async function ensureWasm() {
 	if (wasmReady) return;
 	if (!wasmLoading) {
 		wasmLoading = (async () => {
-			goInstance = new Go();
-			const resp = await fetch("/croc.wasm");
-			const inst = await WebAssembly.instantiateStreaming(
-				resp,
-				goInstance.importObject,
-			);
-			goInstance.run(inst.instance); // instantiateStreaming returns {module, instance}; run needs the instance
+			try {
+				goInstance = new Go();
+				const resp = await fetch("/croc.wasm");
+				if (!resp.ok) {
+					throw new Error(
+						`Failed to fetch croc.wasm: HTTP ${resp.status}`,
+					);
+				}
+				const inst = await WebAssembly.instantiateStreaming(
+					resp,
+					goInstance.importObject,
+				);
+				goInstance.run(inst.instance); // instantiateStreaming returns {module, instance}; run needs the instance
+				await waitForWasmExports();
+				wasmReady = true;
+			} catch (err) {
+				wasmLoading = null;
+				throw err;
+			}
 		})();
 	}
 	await wasmLoading;
-	// Poll until Go main() has registered the exported functions on self.
-	while (typeof self.wasmEncrypt !== "function") {
-		await new Promise((r) => setTimeout(r, 2));
-	}
-	wasmReady = true;
 }
 
 self.onmessage = async (e) => {

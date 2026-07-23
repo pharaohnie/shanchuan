@@ -70,23 +70,47 @@ func (r *Relay) deleteRoom(name string) {
 	delete(r.rooms, name)
 }
 
+// expire closes connections and unblocks any waiter on room.ready.
+// The caller must hold relay.mu and have removed the room from the map.
+func (room *Room) expire(reason string) {
+	room.mu.Lock()
+	defer room.mu.Unlock()
+
+	select {
+	case <-room.ready:
+	default:
+		close(room.ready)
+	}
+
+	if room.first != nil {
+		errMsg, _ := json.Marshal(RelayMessage{Type: "error", Msg: reason})
+		room.first.WriteMessage(websocket.TextMessage, errMsg)
+		room.first.Close()
+		room.first = nil
+	}
+	if room.second != nil {
+		room.second.Close()
+		room.second = nil
+	}
+}
+
 func (r *Relay) cleanupLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
 	for range ticker.C {
+		var stale []*Room
 		r.mu.Lock()
 		for name, room := range r.rooms {
 			if time.Since(room.createdAt) > 30*time.Minute {
 				log.Printf("[relay] cleanup stale room '%s'", name)
-				if room.first != nil {
-					room.first.Close()
-				}
-				if room.second != nil {
-					room.second.Close()
-				}
 				delete(r.rooms, name)
+				stale = append(stale, room)
 			}
 		}
 		r.mu.Unlock()
+
+		for _, room := range stale {
+			room.expire("Room expired due to inactivity")
+		}
 	}
 }
 
@@ -173,12 +197,16 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		pairMsg, _ := json.Marshal(RelayMessage{Type: "waiting", Role: "sender"})
 		conn.WriteMessage(websocket.TextMessage, pairMsg)
 
-		// Wait for second client
+		// Wait for second client (or room expiry from cleanupLoop).
 		<-room.ready
 
 		room.mu.Lock()
 		first, second := room.first, room.second
 		room.mu.Unlock()
+
+		if first == nil || second == nil {
+			return
+		}
 
 		pipeConnections(first, second)
 

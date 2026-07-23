@@ -251,10 +251,23 @@ async function connectAndTransfer() {
 
 		ws.onerror = () => rejectOnce(new Error("WebSocket error"));
 
-		ws.onclose = (event) => {
+		ws.onclose = async (event) => {
 			addLog(state.role, `WebSocket closed (code: ${event.code})`);
+			try {
+				await chain;
+			} catch {
+				return; // chain already reported the error
+			}
 			if (!settled) {
-				rejectOnce(new Error(`Connection closed: code=${event.code}`));
+				if (
+					state.role === "receiver" &&
+					state.totalChunks > 0 &&
+					state.currentChunk >= state.totalChunks
+				) {
+					resolveOnce();
+				} else {
+					rejectOnce(new Error(`Connection closed: code=${event.code}`));
+				}
 			}
 		};
 
@@ -402,8 +415,8 @@ async function sendFile(ws) {
 	$("send-status").textContent = "✅ 文件发送完成！";
 	$("send-progress-bar").style.width = "100%";
 	addLog("send", "File transfer complete!");
-	// ws is closed by the caller after resolveOnce(), so onclose sees settled=true
-	// and does not spuriously reject the completed transfer.
+	// ws is closed by the caller after resolveOnce(); receiver onclose awaits
+	// the enqueue chain before deciding whether the close was an error.
 }
 
 // ─── Receiver: File Reception ──────────────────────────────────────────────
