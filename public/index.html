@@ -61,6 +61,7 @@
               <input
                 type="file"
                 id="file-input"
+                multiple
                 onchange="handleFileSelect(event)"
                 hidden
               />
@@ -68,14 +69,14 @@
                 class="btn btn-secondary"
                 onclick="document.getElementById('file-input').click()"
               >
-                选择文件
+                选择文件（可多选）
               </button>
             </div>
           </div>
           <div id="send-file-info" class="file-info hidden">
             <div class="file-detail">
-              <span class="file-name" id="send-file-name"></span>
-              <span class="file-size" id="send-file-size"></span>
+              <ul id="send-file-list" class="file-list"></ul>
+              <span class="file-size" id="send-file-total-size"></span>
             </div>
             <button
               class="btn btn-primary"
@@ -145,13 +146,7 @@
             </div>
             <div class="log-output" id="receive-log"></div>
             <div id="receive-download-section" class="hidden download-section">
-              <button
-                class="btn btn-success"
-                id="btn-download"
-                onclick="downloadReceivedFile()"
-              >
-                ⬇️ 下载文件
-              </button>
+              <div id="receive-download-list" class="download-list"></div>
             </div>
           </div>
         </div>

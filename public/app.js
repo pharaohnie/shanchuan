@@ -24,6 +24,75 @@ function effectiveChunkSize(transport) {
 		: CHUNK_SIZE;
 }
 
+function totalChunksForFile(file, transport) {
+	const chunkSize = effectiveChunkSize(transport);
+	return Math.ceil(file.size / chunkSize);
+}
+
+function batchTotalChunksForFiles(files, transport) {
+	let total = 0;
+	for (const file of files) {
+		total += totalChunksForFile(file, transport);
+	}
+	return total;
+}
+
+function batchGlobalChunks(fileIndex, chunkInFile, files, transport) {
+	let done = 0;
+	for (let i = 0; i < fileIndex; i++) {
+		done += totalChunksForFile(files[i], transport);
+	}
+	return done + chunkInFile;
+}
+
+function progressPercent(globalChunk, batchTotal) {
+	return batchTotal > 0 ? (globalChunk / batchTotal) * 100 : 100;
+}
+
+function setProgressBar(el, percent, animate = false) {
+	if (!el) return;
+	const p = Math.min(100, Math.max(0, percent)) / 100;
+	el.classList.toggle("is-complete", animate);
+	el.style.transform = `scaleX(${p})`;
+}
+
+function formatTransferProgress(
+	role,
+	fileIndex,
+	fileCount,
+	fileName,
+	globalChunk,
+	batchTotal,
+) {
+	const icon = role === "send" ? "📤" : "📥";
+	const verb = role === "send" ? "发送中" : "接收中";
+	const pct = progressPercent(globalChunk, batchTotal).toFixed(1);
+	const chunkPart = `Chunk ${globalChunk}/${batchTotal} (${pct}%)`;
+	if (fileCount > 1) {
+		return `${icon} ${verb} ${fileIndex + 1}/${fileCount} · ${fileName} · ${chunkPart}`;
+	}
+	return `${icon} ${verb}... ${chunkPart}`;
+}
+
+function receiveGlobalChunk() {
+	return state.batchDoneChunks + state.currentChunk;
+}
+
+function updateReceiveProgressUI() {
+	const global = receiveGlobalChunk();
+	const batchTotal = state.batchTotalChunks;
+	const name = state.receivedMetadata?.name ?? "";
+	$("receive-status").textContent = formatTransferProgress(
+		"receive",
+		state.fileIndex,
+		state.fileCount,
+		name,
+		global,
+		batchTotal,
+	);
+	setProgressBar($("receive-progress-bar"), progressPercent(global, batchTotal));
+}
+
 // ─── State ────────────────────────────────────────────────────────────────
 const state = {
 	role: null, // 'sender' | 'receiver'
@@ -44,6 +113,12 @@ const state = {
 	transport: null, // RelayTransport | P2pTransport
 	transportMode: null, // 'p2p' | 'relay'
 	stunReachable: null, // null=checking, true/false=STUN precheck result
+	fileCount: 1, // batch total files (receiver)
+	fileIndex: 0, // current file index in batch (receiver)
+	saveDir: null, // showDirectoryPicker handle (multi-file batch)
+	receivedFiles: [], // [{name, url}] in memory fallback mode
+	batchTotalChunks: 0, // total chunks across batch (receiver)
+	batchDoneChunks: 0, // chunks from fully received files (receiver)
 };
 
 // ─── Worker Bridge ────────────────────────────────────────────────────────
@@ -205,15 +280,31 @@ async function waitForStunPrecheck() {
 	return r.ok;
 }
 
+function isBatchComplete() {
+	const fileDone =
+		state.totalChunks === 0 ||
+		(state.totalChunks > 0 && state.currentChunk >= state.totalChunks);
+	return fileDone && state.fileIndex >= state.fileCount - 1;
+}
+
+function resetForNextFile() {
+	state._metadataReceived = false;
+	state.currentChunk = 0;
+	state.totalChunks = 0;
+	state.merged = null;
+	state.mergeOffset = 0;
+	state.writable = null;
+	state.fileHandle = null;
+	state.streaming = false;
+	state.receivedMetadata = null;
+}
+
 function bindReceiverTransport(transport, enqueue, resolveOnce) {
 	state.transport = transport;
 	transport.onMessage((data) => {
 		enqueue(async () => {
 			await handleReceivedData(data);
-			if (
-				state.totalChunks > 0 &&
-				state.currentChunk >= state.totalChunks
-			) {
+			if (isBatchComplete()) {
 				resolveOnce();
 			}
 		});
@@ -280,14 +371,39 @@ async function setupSenderTransport(ws, assignNegotiator, flushPendingSignaling)
 }
 
 // ─── Send Flow ────────────────────────────────────────────────────────────
-function handleFileSelect(event) {
-	const file = event.target.files[0];
-	if (!file) return;
-	state.files = [file];
-	$("send-file-name").textContent = file.name;
-	$("send-file-size").textContent = formatSize(file.size);
+function renderSelectedFiles() {
+	const list = $("send-file-list");
+	const totalEl = $("send-file-total-size");
+	list.innerHTML = "";
+	let totalBytes = 0;
+	for (const file of state.files) {
+		totalBytes += file.size;
+		const li = document.createElement("li");
+		li.className = "file-list-item";
+		const name = document.createElement("span");
+		name.className = "file-name";
+		name.textContent = file.name;
+		name.title = file.name;
+		const size = document.createElement("span");
+		size.className = "file-size";
+		size.textContent = formatSize(file.size);
+		li.append(name, size);
+		list.appendChild(li);
+	}
+	const n = state.files.length;
+	totalEl.textContent =
+		n === 1
+			? formatSize(totalBytes)
+			: `共 ${n} 个文件，${formatSize(totalBytes)}`;
 	$("send-file-info").classList.remove("hidden");
 	$("btn-start-send").disabled = false;
+}
+
+function handleFileSelect(event) {
+	const files = Array.from(event.target.files || []);
+	if (files.length === 0) return;
+	state.files = files;
+	renderSelectedFiles();
 }
 
 async function startSend() {
@@ -305,8 +421,15 @@ async function startSend() {
 	$("send-code").textContent = state.code;
 	$("send-upload-card").classList.add("hidden");
 	$("send-progress-card").classList.remove("hidden");
-	$("send-progress-card").querySelector("h2").textContent = "📤 发送文件";
+	const fileLabel =
+		state.files.length === 1
+			? "📤 发送文件"
+			: `📤 发送 ${state.files.length} 个文件`;
+	$("send-progress-card").querySelector("h2").textContent = fileLabel;
 	addLog("send", `Code phrase: ${state.code}`);
+	if (state.files.length > 1) {
+		addLog("send", `Sending ${state.files.length} files`);
+	}
 
 	try {
 		await connectAndTransfer();
@@ -446,11 +569,7 @@ async function connectAndTransfer() {
 				return; // chain already reported the error
 			}
 			if (!settled) {
-				if (
-					state.role === "receiver" &&
-					state.totalChunks > 0 &&
-					state.currentChunk >= state.totalChunks
-				) {
+				if (state.role === "receiver" && isBatchComplete()) {
 					resolveOnce();
 				} else {
 					rejectOnce(new Error(`Connection closed: code=${event.code}`));
@@ -503,7 +622,7 @@ async function connectAndTransfer() {
 						);
 						$("send-status").textContent =
 							"🔑 密钥已建立，开始发送文件...";
-						await sendFile(transport);
+						await sendAllFiles(transport);
 						resolveOnce();
 						ws.close();
 					} else {
@@ -515,6 +634,12 @@ async function connectAndTransfer() {
 						state.currentChunk = 0;
 						state.totalChunks = 0;
 						state.receivedMetadata = null;
+						state.fileCount = 1;
+						state.fileIndex = 0;
+						state.saveDir = null;
+						state.receivedFiles = [];
+						state.batchTotalChunks = 0;
+						state.batchDoneChunks = 0;
 						if (!negotiator) {
 							negotiator = new P2pNegotiator(ws, "receiver");
 							await negotiator.start();
@@ -539,8 +664,24 @@ async function connectAndTransfer() {
 // being read + encrypted in the Worker. This overlaps file I/O, Worker
 // encryption, and transport.send so throughput is bounded by the slowest stage
 // rather than their sum. Backpressure (bufferedAmount) prevents unbounded buffering.
-async function sendFile(transport) {
-	const file = state.files[0];
+async function sendAllFiles(transport) {
+	const files = state.files;
+	const fileCount = files.length;
+	const batchTotalChunks = batchTotalChunksForFiles(files, transport);
+	setProgressBar($("send-progress-bar"), 0);
+	for (let i = 0; i < fileCount; i++) {
+		await sendOneFile(transport, files[i], i, fileCount, batchTotalChunks);
+	}
+	$("send-status").textContent =
+		fileCount > 1 ? `✅ ${fileCount} 个文件发送完成！` : "✅ 文件发送完成！";
+	setProgressBar($("send-progress-bar"), 100, true);
+	addLog(
+		"send",
+		fileCount > 1 ? `All ${fileCount} files sent` : "File transfer complete!",
+	);
+}
+
+async function sendOneFile(transport, file, fileIndex, fileCount, batchTotalChunks) {
 	const chunkSize = effectiveChunkSize(transport);
 	const totalChunks = Math.ceil(file.size / chunkSize);
 	state.totalChunks = totalChunks;
@@ -549,26 +690,67 @@ async function sendFile(transport) {
 
 	addLog(
 		"send",
-		`File: ${file.name}, Size: ${formatSize(file.size)}, Chunks: ${totalChunks}`,
+		`File ${fileIndex + 1}/${fileCount}: ${file.name}, Size: ${formatSize(file.size)}, Chunks: ${totalChunks}`,
 	);
 
-	// Send metadata (encrypted JSON).
 	const metadataBytes = new TextEncoder().encode(
 		JSON.stringify({
 			name: file.name,
 			size: file.size,
 			chunks: totalChunks,
+			fileIndex,
+			fileCount,
+			batchTotalChunks,
 		}),
 	);
 	const metadataEnc = await wasmCall("wasmEncrypt", keyBytes, null, metadataBytes);
 	transport.send(metadataEnc);
 	addLog("send", "Metadata sent");
 
-	$("send-status").textContent = `📤 发送中... 0/${totalChunks}`;
+	const updateSendProgress = (chunkInFile) => {
+		const global = batchGlobalChunks(
+			fileIndex,
+			chunkInFile,
+			state.files,
+			transport,
+		);
+		$("send-status").textContent = formatTransferProgress(
+			"send",
+			fileIndex,
+			fileCount,
+			file.name,
+			global,
+			batchTotalChunks,
+		);
+		setProgressBar(
+			$("send-progress-bar"),
+			progressPercent(global, batchTotalChunks),
+		);
+	};
+
+	const logSendChunk = (chunkInFile) => {
+		const global = batchGlobalChunks(
+			fileIndex,
+			chunkInFile,
+			state.files,
+			transport,
+		);
+		const fileNote =
+			fileCount > 1 ? ` (file ${fileIndex + 1}/${fileCount})` : "";
+		addLog(
+			"send",
+			`Chunk ${global}/${batchTotalChunks} sent${fileNote}`,
+		);
+	};
+
+	updateSendProgress(0);
+
+	if (totalChunks === 0) {
+		return;
+	}
 
 	const fileReader = new FileReader();
 
-	// Read file chunk i into a Uint8Array.
 	const readChunk = (i) =>
 		new Promise((resolve) => {
 			const start = i * chunkSize;
@@ -577,39 +759,88 @@ async function sendFile(transport) {
 			fileReader.readAsArrayBuffer(file.slice(start, end));
 		});
 
-	// Read + encrypt chunk i (encryption runs in the Worker).
 	const encryptChunk = async (i) => {
 		const chunkData = await readChunk(i);
 		return wasmCall("wasmEncrypt", keyBytes, encodeSeq(i), chunkData);
 	};
 
-	// Wait if the send buffer is too full (backpressure).
 	const drain = () => transport.drain(BACKPRESSURE_THRESHOLD);
 
-	// Pipelined send: prefetch chunk i+1 while sending chunk i.
 	let prefetch = encryptChunk(0);
 	for (let i = 0; i < totalChunks; i++) {
 		const encrypted = await prefetch;
 		if (i + 1 < totalChunks) {
-			prefetch = encryptChunk(i + 1); // start next read+encrypt now
+			prefetch = encryptChunk(i + 1);
 		}
 		await drain();
 		transport.send(encrypted);
 
 		state.currentChunk = i + 1;
-		$("send-status").textContent = `📤 发送中... ${i + 1}/${totalChunks}`;
-		$("send-progress-bar").style.width = `${((i + 1) / totalChunks) * 100}%`;
-		addLog("send", `Chunk ${i + 1}/${totalChunks} sent`);
+		updateSendProgress(i + 1);
+		logSendChunk(i + 1);
 	}
-
-	$("send-status").textContent = "✅ 文件发送完成！";
-	$("send-progress-bar").style.width = "100%";
-	addLog("send", "File transfer complete!");
-	// ws is closed by the caller after resolveOnce(); receiver onclose awaits
-	// the enqueue chain before deciding whether the close was an error.
 }
 
 // ─── Receiver: File Reception ──────────────────────────────────────────────
+function renderDownloadList() {
+	const list = $("receive-download-list");
+	list.innerHTML = "";
+	for (const f of state.receivedFiles) {
+		const btn = document.createElement("button");
+		btn.className = "btn btn-success";
+		btn.textContent = `⬇️ ${f.name}`;
+		btn.onclick = () => {
+			const a = document.createElement("a");
+			a.href = f.url;
+			a.download = f.name;
+			a.click();
+		};
+		list.appendChild(btn);
+	}
+	$("receive-download-section").classList.remove("hidden");
+}
+
+async function finishCurrentFile() {
+	const metadata = state.receivedMetadata;
+	if (state.streaming) {
+		await state.writable.close();
+		state.writable = null;
+		addLog(
+			"receive",
+			`File saved: ${metadata.name} (${formatSize(metadata.size)})`,
+		);
+	} else {
+		const blob = new Blob([state.merged]);
+		const url = URL.createObjectURL(blob);
+		state.receivedFiles.push({ name: metadata.name, url });
+		addLog(
+			"receive",
+			`File received: ${metadata.name} (${formatSize(metadata.size)})`,
+		);
+	}
+
+	if (state.fileIndex < state.fileCount - 1) {
+		state.batchDoneChunks += metadata.chunks;
+		resetForNextFile();
+		return false;
+	}
+
+	if (state.streaming) {
+		$("receive-status").textContent =
+			state.fileCount > 1
+				? `✅ 已接收 ${state.fileCount} 个文件`
+				: "✅ 文件已保存到磁盘！";
+	} else {
+		$("receive-status").textContent =
+			state.fileCount > 1
+				? `✅ 已接收 ${state.fileCount} 个文件`
+				: "✅ 文件接收完成！";
+		renderDownloadList();
+	}
+	setProgressBar($("receive-progress-bar"), 100, true);
+	return true;
+}
+
 async function handleReceivedData(data) {
 	// 3.2: AAD binds each chunk's position. Metadata uses no AAD; data chunk k
 	// uses seq=k, so reordering/replay fails GCM authentication on decrypt.
@@ -617,7 +848,6 @@ async function handleReceivedData(data) {
 	const decrypted = await wasmCall("wasmDecrypt", state.sessionKeyBytes, aad, data);
 
 	if (!state._metadataReceived) {
-		// First message is metadata.
 		state._metadataReceived = true;
 		const metadataStr = new TextDecoder().decode(decrypted);
 		let metadata;
@@ -626,16 +856,47 @@ async function handleReceivedData(data) {
 		} catch (err) {
 			throw new Error(`Invalid metadata: ${err.message}`);
 		}
+		const fileIndex = metadata.fileIndex ?? 0;
+		const fileCount = metadata.fileCount ?? 1;
 		state.receivedMetadata = metadata;
+		state.fileIndex = fileIndex;
+		state.fileCount = fileCount;
 		state.totalChunks = metadata.chunks;
 		state.currentChunk = 0;
+		state.batchTotalChunks =
+			metadata.batchTotalChunks ?? metadata.chunks;
 
-		// 3.1: stream to disk via File System Access API when available (supports
-		// GB files without holding the whole file in memory). Falls back to an
-		// in-memory buffer otherwise.
 		state.streaming = false;
 		state.writable = null;
-		if (window.showSaveFilePicker) {
+
+		if (fileIndex === 0 && fileCount > 1 && window.showDirectoryPicker) {
+			try {
+				state.saveDir = await window.showDirectoryPicker();
+				addLog("receive", "Save directory selected for batch");
+			} catch (err) {
+				if (err.name === "AbortError") {
+					throw new Error("用户取消了保存位置选择");
+				}
+				addLog(
+					"receive",
+					`Directory picker unavailable: ${err.message}`,
+				);
+			}
+		}
+
+		if (state.saveDir) {
+			try {
+				state.fileHandle = await state.saveDir.getFileHandle(
+					metadata.name,
+					{ create: true },
+				);
+				state.writable = await state.fileHandle.createWritable();
+				state.streaming = true;
+				addLog("receive", "Streaming to disk (File System Access API)");
+			} catch (err) {
+				throw new Error(`无法写入文件 ${metadata.name}: ${err.message}`);
+			}
+		} else if (window.showSaveFilePicker) {
 			try {
 				state.fileHandle = await window.showSaveFilePicker({
 					suggestedName: metadata.name,
@@ -662,13 +923,16 @@ async function handleReceivedData(data) {
 			"receive",
 			`Receiving: ${metadata.name} (${formatSize(metadata.size)}), ${metadata.chunks} chunks`,
 		);
-		$("receive-status").textContent =
-			`📥 接收中... 0/${metadata.chunks}`;
 		$("receive-progress-container").classList.remove("hidden");
+		void $("receive-progress-bar").offsetWidth;
+		updateReceiveProgressUI();
+
+		if (metadata.chunks === 0) {
+			await finishCurrentFile();
+		}
 		return;
 	}
 
-	// Write the decrypted chunk to disk (streaming) or in-memory buffer.
 	if (state.streaming) {
 		await state.writable.write(decrypted);
 	} else {
@@ -677,46 +941,27 @@ async function handleReceivedData(data) {
 	}
 	state.currentChunk++;
 
-	$("receive-status").textContent =
-		`📥 接收中... ${state.currentChunk}/${state.totalChunks}`;
-	$("receive-progress-bar").style.width =
-		`${(state.currentChunk / state.totalChunks) * 100}%`;
-	addLog("receive", `Chunk ${state.currentChunk}/${state.totalChunks} received`);
+	updateReceiveProgressUI();
+	const global = receiveGlobalChunk();
+	const fileNote =
+		state.fileCount > 1
+			? ` (file ${state.fileIndex + 1}/${state.fileCount})`
+			: "";
+	addLog(
+		"receive",
+		`Chunk ${global}/${state.batchTotalChunks} received${fileNote}`,
+	);
 
-	// Check if transfer is complete.
 	if (state.currentChunk >= state.totalChunks) {
-		if (state.streaming) {
-			await state.writable.close();
-			state.writable = null;
-			$("receive-status").textContent = "✅ 文件已保存到磁盘！";
-			$("receive-progress-bar").style.width = "100%";
-			addLog(
-				"receive",
-				`File saved: ${state.receivedMetadata.name} (${formatSize(state.receivedMetadata.size)})`,
-			);
-			// No download button: file is already on disk.
-		} else {
-			const blob = new Blob([state.merged]);
-			const url = URL.createObjectURL(blob);
-			state._downloadUrl = url;
-			state._downloadName = state.receivedMetadata.name;
-			$("receive-status").textContent = "✅ 文件接收完成！";
-			$("receive-progress-bar").style.width = "100%";
-			addLog(
-				"receive",
-				`File received: ${state.receivedMetadata.name} (${formatSize(state.receivedMetadata.size)})`,
-			);
-			$("receive-download-section").classList.remove("hidden");
-			$("btn-download").onclick = () => downloadReceivedFile();
-		}
+		await finishCurrentFile();
 	}
 }
 
 function downloadReceivedFile() {
-	if (state._downloadUrl) {
+	for (const f of state.receivedFiles) {
 		const a = document.createElement("a");
-		a.href = state._downloadUrl;
-		a.download = state._downloadName;
+		a.href = f.url;
+		a.download = f.name;
 		a.click();
 	}
 }

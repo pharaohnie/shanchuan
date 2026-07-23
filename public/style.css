@@ -294,6 +294,42 @@ body {
 	color: var(--text-muted);
 }
 
+.file-list {
+	list-style: none;
+	margin: 0 0 8px;
+	padding: 0;
+	max-height: 160px;
+	overflow-y: auto;
+}
+
+.file-list-item {
+	display: flex;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 6px 0;
+	border-bottom: 1px solid var(--border);
+	font-size: 14px;
+}
+
+.file-list-item:last-child {
+	border-bottom: none;
+}
+
+.file-list-item .file-name {
+	flex: 1;
+	min-width: 0;
+}
+
+.file-list-item .file-size {
+	flex-shrink: 0;
+}
+
+.download-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
 /* ─── Buttons ─────────────────────────────────────────────────────────── */
 .btn {
 	padding: 10px 24px;
@@ -427,6 +463,7 @@ body {
 
 /* ─── Progress Bar ────────────────────────────────────────────────────── */
 .progress-bar-container {
+	position: relative;
 	width: 100%;
 	height: 8px;
 	background: var(--surface-2);
@@ -437,10 +474,16 @@ body {
 
 .progress-bar {
 	height: 100%;
-	width: 0%;
+	width: 100%;
+	transform: scaleX(0);
+	transform-origin: left center;
 	background: linear-gradient(90deg, var(--primary), var(--success));
 	border-radius: 4px;
-	transition: width 0.3s ease;
+	transition: none;
+}
+
+.progress-bar.is-complete {
+	transition: transform 0.3s ease;
 }
 
 /* ─── Log Output ──────────────────────────────────────────────────────── */
