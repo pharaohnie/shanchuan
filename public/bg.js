@@ -90,7 +90,7 @@ if (renderer) {
   geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 
   const material = new THREE.PointsMaterial({
-    size: isMobile ? 1.6 : 1.2,
+    size: isMobile ? 1.0 : 0.7,
     map: makeGlowTexture(),
     vertexColors: true,
     transparent: true,
