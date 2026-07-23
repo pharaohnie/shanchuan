@@ -1,0 +1,41 @@
+# Croc-WASM 中继服务配置
+# 启动时由 relay 读取；可通过 -config 参数指定路径，默认 ../config.yaml
+
+server:
+  # HTTP/WebSocket 监听地址
+  # 示例: ":8154"（全部网卡）或 "127.0.0.1:8154"（仅本机）
+  addr: ":8154"
+
+cors:
+  # 浏览器跨域请求（fetch、XHR）允许的 Origin 列表
+  # 生产环境填写实际前端域名，如 "https://croc.example.com"
+  allowed_origins:
+    - "http://localhost:8154"
+
+websocket:
+  # WebSocket Upgrade 握手时校验的 Origin 白名单
+  # 应与 cors.allowed_origins 保持一致，防止任意网站连接中继
+  # 设为 ["*"] 表示允许所有来源（仅本地调试，不安全）
+  allowed_origins:
+    - "http://localhost:8154"
+
+client:
+  # 前端连接中继的 WebSocket 完整 URL
+  # 示例:
+  #   "ws://localhost:8154/ws"    — 本地明文
+  #   "wss://relay.example.com/ws" — 生产 TLS
+  # 留空时，前端根据当前页面协议自动推导:
+  #   http  → ws://{host}/ws
+  #   https → wss://{host}/ws
+  relay_url: ""
+
+rate_limit:
+  # 每个 IP 每分钟允许的中继房间 join 次数（防暴力枚举口令）
+  join_per_minute: 30
+  # 每个 IP 每分钟允许的 STUN 检测上报次数
+  stun_check_per_minute: 10
+
+security:
+  # Content-Security-Policy 响应头（留空则不发送）
+  # 默认允许同源脚本、jsDelivr CDN、WebSocket/STUN 连接
+  content_security_policy: "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; connect-src 'self' ws: wss: stun:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; worker-src 'self'"

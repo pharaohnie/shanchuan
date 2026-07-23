@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"log"
 	"net/http"
 	"sync"
@@ -13,11 +14,12 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin:     func(r *http.Request) bool { return true },
-	ReadBufferSize:  256 * 1024, // was 4KB; a single chunk+overhead now fits in one read
-	WriteBufferSize: 256 * 1024,
-}
+var (
+	cfg       Config
+	upgrader  websocket.Upgrader
+	joinLimit *ipRateLimiter
+	stunLimit *ipRateLimiter
+)
 
 // Room manages two paired WebSocket connections
 type Room struct {
@@ -56,6 +58,27 @@ type StunReport struct {
 	Error          string   `json:"error,omitempty"`
 }
 
+func initUpgrader() {
+	upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return cfg.websocketOriginAllowed(r)
+		},
+		ReadBufferSize:  256 * 1024,
+		WriteBufferSize: 256 * 1024,
+	}
+}
+
+func handleConfigAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(ClientAPIResponse{
+		RelayURL: cfg.Client.RelayURL,
+	})
+}
+
 func handleStunCheck(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -68,11 +91,24 @@ func handleStunCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(report.Server) > 256 {
+		http.Error(w, "server field too long", http.StatusBadRequest)
+		return
+	}
+	if len(report.Error) > 512 {
+		http.Error(w, "error field too long", http.StatusBadRequest)
+		return
+	}
+	if len(report.CandidateTypes) > 32 {
+		http.Error(w, "too many candidate types", http.StatusBadRequest)
+		return
+	}
+
 	remote := r.RemoteAddr
 	if report.Ok {
 		log.Printf(
 			"[relay] STUN check from %s: ok server=%s elapsed=%dms types=%v",
-			remote, report.Server, report.ElapsedMs, report.CandidateTypes,
+			remote, truncateForLog(report.Server, 256), report.ElapsedMs, report.CandidateTypes,
 		)
 	} else {
 		errMsg := report.Error
@@ -81,7 +117,8 @@ func handleStunCheck(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf(
 			"[relay] STUN check from %s: failed server=%s elapsed=%dms types=%v error=%s",
-			remote, report.Server, report.ElapsedMs, report.CandidateTypes, errMsg,
+			remote, truncateForLog(report.Server, 256), report.ElapsedMs, report.CandidateTypes,
+			truncateForLog(errMsg, 512),
 		)
 	}
 
@@ -143,7 +180,6 @@ func (r *Relay) deleteRoom(name string) {
 }
 
 // expire closes connections and unblocks any waiter on room.ready.
-// The caller must hold relay.mu and have removed the room from the map.
 func (room *Room) expire(reason string) {
 	room.mu.Lock()
 	defer room.mu.Unlock()
@@ -186,8 +222,6 @@ func (r *Relay) cleanupLoop() {
 	}
 }
 
-// pipeConnections forwards messages between two WebSocket connections.
-// Returns when either connection closes.
 func pipeConnections(room string, a, b *websocket.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -223,7 +257,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	remoteAddr := conn.RemoteAddr().String()
 	log.Printf("[relay] new connection from %s", remoteAddr)
 
-	// Read join message
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
 		log.Printf("[relay] %s: read join error: %v", remoteAddr, err)
@@ -244,20 +277,33 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(joinMsg.Room) > 128 {
+		fullMsg, _ := json.Marshal(RelayMessage{Type: "error", Msg: "Room code too long"})
+		conn.WriteMessage(websocket.TextMessage, fullMsg)
+		conn.Close()
+		return
+	}
+
+	if !joinLimit.allow(clientIP(r)) {
+		log.Printf("[relay] %s: join rate limit exceeded", remoteAddr)
+		fullMsg, _ := json.Marshal(RelayMessage{Type: "error", Msg: "Rate limit exceeded"})
+		conn.WriteMessage(websocket.TextMessage, fullMsg)
+		conn.Close()
+		return
+	}
+
 	log.Printf("[relay] %s joining room '%s'", remoteAddr, joinMsg.Room)
 
 	room := relay.getOrCreateRoom(joinMsg.Room)
 	room.mu.Lock()
 
 	if room.first == nil {
-		// ── First client ──
 		room.first = conn
 		room.mu.Unlock()
 
 		pairMsg, _ := json.Marshal(RelayMessage{Type: "waiting", Role: "sender"})
 		conn.WriteMessage(websocket.TextMessage, pairMsg)
 
-		// Wait for second client (or room expiry from cleanupLoop).
 		<-room.ready
 
 		room.mu.Lock()
@@ -274,7 +320,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		relay.deleteRoom(joinMsg.Room)
 
 	} else if room.second == nil {
-		// ── Second client ──
 		room.second = conn
 		room.mu.Unlock()
 
@@ -292,7 +337,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		relay.deleteRoom(joinMsg.Room)
 
 	} else {
-		// Room is full
 		room.mu.Unlock()
 		fullMsg, _ := json.Marshal(RelayMessage{Type: "error", Msg: "Room is full"})
 		conn.WriteMessage(websocket.TextMessage, fullMsg)
@@ -300,25 +344,57 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func securityMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if csp := cfg.Security.ContentSecurityPolicy; csp != "" {
+			w.Header().Set("Content-Security-Policy", csp)
+		}
+		if origin := cfg.corsOrigin(r); origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		}
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
+	configPath := flag.String("config", "", "path to config.yaml (default: auto-detect)")
+	flag.Parse()
+
+	resolved := resolveConfigPath(*configPath)
+	var err error
+	cfg, err = loadConfig(resolved)
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+	log.Printf("[relay] loaded config from %s", resolved)
+
+	initUpgrader()
+	joinLimit = newIPRateLimiter(cfg.RateLimit.JoinPerMinute, time.Minute)
+	stunLimit = newIPRateLimiter(cfg.RateLimit.StunCheckPerMinute, time.Minute)
+
 	go relay.cleanupLoop()
 
-	http.HandleFunc("/ws", handleWebSocket)
-	http.HandleFunc("/api/stun-check", handleStunCheck)
-	http.Handle("/", http.FileServer(http.Dir("../public")))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", handleWebSocket)
+	mux.HandleFunc("/api/config", handleConfigAPI)
+	mux.HandleFunc("/api/stun-check", stunLimit.middleware(handleStunCheck))
+	mux.Handle("/", http.FileServer(http.Dir("../public")))
 
-	addr := ":8154"
+	addr := cfg.Server.Addr
 	log.Printf("🐊 Croc-WASM Relay Server starting on %s", addr)
 	log.Printf("   WebSocket endpoint: ws://localhost%s/ws", addr)
 	log.Printf("   Frontend: http://localhost%s", addr)
+	log.Printf("   CORS origins: %v", cfg.CORS.AllowedOrigins)
+	log.Printf("   WebSocket origins: %v", cfg.WebSocket.AllowedOrigins)
 
-	// Wrap the default mux to add CORS and logging
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:8154")
-		http.DefaultServeMux.ServeHTTP(w, r)
-	})
-
-	if err := http.ListenAndServe(addr, handler); err != nil {
+	if err := http.ListenAndServe(addr, securityMiddleware(mux)); err != nil {
 		log.Fatal(err)
 	}
 }

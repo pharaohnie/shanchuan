@@ -3,7 +3,7 @@
 // 发送：粒子左→右；接收：右→左；传输中进度越高流速越快（二次加速）、亮度提升。
 // 背景加载失败时不挂 bgFX，调用方一律可选链，功能不受影响。
 
-import * as THREE from "three";
+import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js";
 
 const canvas = document.getElementById("bg-canvas");
 

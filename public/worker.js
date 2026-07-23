@@ -4,13 +4,21 @@
 // Uint8Array results are transferred back zero-copy.
 importScripts("/wasm_exec.js");
 
+const WASM_FUNCTIONS = new Set([
+	"wasmInitPAKE",
+	"wasmGetPAKEMessage",
+	"wasmProcessPAKEMessage",
+	"wasmGetSessionKey",
+	"wasmEncrypt",
+	"wasmDecrypt",
+]);
+
 let goInstance = null;
 let wasmReady = false;
 let wasmLoading = null;
 
 const WASM_LOAD_TIMEOUT_MS = 30000;
 
-// Poll until Go main() has registered the exported functions on self.
 async function waitForWasmExports() {
 	const deadline = Date.now() + WASM_LOAD_TIMEOUT_MS;
 	while (typeof self.wasmEncrypt !== "function") {
@@ -23,8 +31,6 @@ async function waitForWasmExports() {
 	}
 }
 
-// Load + instantiate the Go WASM module, then wait for main() to finish
-// registering exported functions (it ends in select{} and never returns).
 async function ensureWasm() {
 	if (wasmReady) return;
 	if (!wasmLoading) {
@@ -41,7 +47,7 @@ async function ensureWasm() {
 					resp,
 					goInstance.importObject,
 				);
-				goInstance.run(inst.instance); // instantiateStreaming returns {module, instance}; run needs the instance
+				goInstance.run(inst.instance);
 				await waitForWasmExports();
 				wasmReady = true;
 			} catch (err) {
@@ -56,13 +62,15 @@ async function ensureWasm() {
 self.onmessage = async (e) => {
 	const { id, fn, args } = e.data;
 	try {
+		if (!WASM_FUNCTIONS.has(fn)) {
+			throw new Error(`Unknown WASM function: ${fn}`);
+		}
 		await ensureWasm();
 		const fnRef = self[fn];
 		if (typeof fnRef !== "function") {
-			throw new Error(`Unknown WASM function: ${fn}`);
+			throw new Error(`WASM export not available: ${fn}`);
 		}
 		const result = fnRef(...args);
-		// Transfer Uint8Array results back zero-copy; everything else is cloned.
 		const transfer = result instanceof Uint8Array ? [result.buffer] : [];
 		self.postMessage({ id, result }, transfer);
 	} catch (err) {
@@ -70,5 +78,4 @@ self.onmessage = async (e) => {
 	}
 };
 
-// Pre-load WASM as soon as the worker starts, so it's ready before first use.
 ensureWasm();

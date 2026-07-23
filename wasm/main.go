@@ -190,6 +190,9 @@ func encrypt(this js.Value, args []js.Value) interface{} {
 	}
 
 	key := make([]byte, args[0].Get("byteLength").Int())
+	if len(key) != 32 {
+		return returnError("encrypt: key must be 32 bytes")
+	}
 	js.CopyBytesToGo(key, args[0])
 
 	var aad []byte
@@ -227,6 +230,9 @@ func decrypt(this js.Value, args []js.Value) interface{} {
 	}
 
 	key := make([]byte, args[0].Get("byteLength").Int())
+	if len(key) != 32 {
+		return returnError("decrypt: key must be 32 bytes")
+	}
 	js.CopyBytesToGo(key, args[0])
 
 	var aad []byte

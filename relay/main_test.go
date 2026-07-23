@@ -3,12 +3,26 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+func initTestRelay() {
+	cfg = defaultConfig()
+	cfg.WebSocket.AllowedOrigins = []string{"*"}
+	initUpgrader()
+	joinLimit = newIPRateLimiter(100, time.Minute)
+	stunLimit = newIPRateLimiter(100, time.Minute)
+}
+
+func TestMain(m *testing.M) {
+	initTestRelay()
+	os.Exit(m.Run())
+}
 
 func TestRoomExpireUnblocksWaiter(t *testing.T) {
 	room := &Room{

@@ -13,7 +13,6 @@
 // All DOM manipulation lives in ui.js behind the `ui` facade; this file is
 // pure transfer logic and exposes `window.croc` for the UI to call into.
 
-const RELAY_URL = `ws://${window.location.host}/ws`;
 const CHUNK_SIZE = 256 * 1024; // 256KB chunks
 const BACKPRESSURE_THRESHOLD = 4 * 1024 * 1024; // pause when ws send buffer > 4MB
 const GCM_OVERHEAD = 12 + 16; // nonce + tag
@@ -110,7 +109,28 @@ const state = {
 	sendMode: "file", // "file" | "text"
 	textSend: false, // true when sending prepared text file
 	isTextPayload: false, // true when receiving kind:text metadata
+	bytesWritten: 0, // streaming mode: cumulative bytes written
 };
+
+let relayUrlPromise = null;
+
+async function getRelayURL() {
+	if (!relayUrlPromise) {
+		relayUrlPromise = (async () => {
+			try {
+				const resp = await fetch("/api/config");
+				if (resp.ok) {
+					const data = await resp.json();
+					return crocSecurity.deriveRelayURL(data.relay_url);
+				}
+			} catch (err) {
+				console.warn("Failed to load relay config, using default:", err);
+			}
+			return crocSecurity.deriveRelayURL("");
+		})();
+	}
+	return relayUrlPromise;
+}
 
 // ─── Worker Bridge ────────────────────────────────────────────────────────
 // The Go WASM module runs in a dedicated Worker; calls return Promises and
@@ -257,6 +277,7 @@ function resetForNextFile() {
 	state.fileHandle = null;
 	state.streaming = false;
 	state.receivedMetadata = null;
+	state.bytesWritten = 0;
 }
 
 function bindReceiverTransport(transport, enqueue, resolveOnce) {
@@ -344,10 +365,17 @@ async function startSend(text) {
 		state.textSend = false;
 	}
 
+	try {
+		crocSecurity.validateSendFiles(state.files);
+	} catch (err) {
+		ui.showError("send", err.message);
+		return;
+	}
+
 	ui.setBusy("send", true);
 
 	// Generate a room code
-	state.code = generateCode();
+	state.code = crocSecurity.generateSecureCode();
 	state.role = "sender";
 
 	// Show the code and switch to the transfer view
@@ -374,6 +402,10 @@ async function startSend(text) {
 async function startReceive(code) {
 	code = (code || "").trim();
 	if (!code) return;
+	if (code.length > 128) {
+		ui.showError("receive", "口令码过长");
+		return;
+	}
 
 	state.code = code;
 	state.role = "receiver";
@@ -393,8 +425,9 @@ async function startReceive(code) {
 
 // ─── Core Transfer Logic ──────────────────────────────────────────────────
 async function connectAndTransfer() {
+	const relayURL = await getRelayURL();
 	return new Promise((resolve, reject) => {
-		const ws = new WebSocket(RELAY_URL);
+		const ws = new WebSocket(relayURL);
 		ws.binaryType = "arraybuffer"; // receive binary as ArrayBuffer (no FileReader)
 		state.ws = ws;
 
@@ -740,8 +773,9 @@ async function handleReceivedData(data) {
 		} catch (err) {
 			throw new Error(`Invalid metadata: ${err.message}`);
 		}
-		const fileIndex = metadata.fileIndex ?? 0;
-		const fileCount = metadata.fileCount ?? 1;
+		metadata = crocSecurity.validateMetadata(metadata);
+		const fileIndex = metadata.fileIndex;
+		const fileCount = metadata.fileCount;
 		state.receivedMetadata = metadata;
 		state.fileIndex = fileIndex;
 		state.fileCount = fileCount;
@@ -754,6 +788,7 @@ async function handleReceivedData(data) {
 		state.isTextPayload = isText;
 		state.streaming = false;
 		state.writable = null;
+		state.bytesWritten = 0;
 
 		if (!isText && fileIndex === 0 && fileCount > 1 && window.showDirectoryPicker) {
 			try {
@@ -807,10 +842,18 @@ async function handleReceivedData(data) {
 	}
 
 	if (state.streaming) {
+		state.bytesWritten += decrypted.length;
+		if (state.bytesWritten > state.receivedMetadata.size) {
+			throw new Error("Received data exceeds declared file size");
+		}
 		await state.writable.write(decrypted);
 	} else {
+		const nextOffset = state.mergeOffset + decrypted.length;
+		if (nextOffset > state.receivedMetadata.size) {
+			throw new Error("Received data exceeds declared file size");
+		}
 		state.merged.set(decrypted, state.mergeOffset);
-		state.mergeOffset += decrypted.length;
+		state.mergeOffset = nextOffset;
 	}
 	state.currentChunk++;
 
@@ -819,21 +862,6 @@ async function handleReceivedData(data) {
 	if (state.currentChunk >= state.totalChunks) {
 		await finishCurrentFile();
 	}
-}
-
-// ─── Code Generation ──────────────────────────────────────────────────────
-const CODE_LENGTH = 5;
-const CODE_CHARS =
-	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-
-function generateCode() {
-	const bytes = new Uint8Array(CODE_LENGTH);
-	crypto.getRandomValues(bytes);
-	let code = "";
-	for (let i = 0; i < CODE_LENGTH; i++) {
-		code += CODE_CHARS[bytes[i] % CODE_CHARS.length];
-	}
-	return code;
 }
 
 // ─── Utility Functions ────────────────────────────────────────────────────
@@ -857,7 +885,16 @@ function encodeSeq(n) {
 }
 
 // ─── UI-facing API ────────────────────────────────────────────────────────
-// ui.js binds all DOM events to these; `state` is exposed read-only.
+// ui.js binds all DOM events to these. Session keys are never exposed.
+function publicState() {
+	return {
+		role: state.role,
+		sendMode: state.sendMode,
+		files: state.files,
+		transportMode: state.transportMode,
+	};
+}
+
 window.croc = {
 	setFiles(files) {
 		state.sendMode = "file";
@@ -870,5 +907,7 @@ window.croc = {
 	startReceive,
 	startStunPrecheck,
 	MAX_TEXT_BYTES,
-	state,
+	get state() {
+		return publicState();
+	},
 };
