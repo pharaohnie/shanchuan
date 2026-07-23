@@ -15,8 +15,8 @@ import (
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin:     func(r *http.Request) bool { return true },
-	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
+	ReadBufferSize:  256 * 1024, // was 4KB; a single chunk+overhead now fits in one read
+	WriteBufferSize: 256 * 1024,
 }
 
 // Room manages two paired WebSocket connections

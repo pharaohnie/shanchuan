@@ -5,10 +5,11 @@
 package main
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"syscall/js"
 
@@ -17,6 +18,44 @@ import (
 
 // Global PAKE instance (one at a time)
 var currentPake *pake.Pake
+
+// Cached AES-GCM cipher. The session key is constant for an entire transfer, so
+// rebuilding the cipher (key schedule + GCM init) for every 64KB chunk is pure
+// waste. We rebuild only when the key actually changes.
+var (
+	cachedKey    []byte
+	cachedAESGCM cipher.AEAD
+	nonceCounter uint64
+)
+
+// getCipher returns a cached AES-GCM cipher, rebuilding only when the key changes.
+func getCipher(key []byte) (cipher.AEAD, error) {
+	if cachedAESGCM != nil && bytes.Equal(cachedKey, key) {
+		return cachedAESGCM, nil
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	cachedKey = append(cachedKey[:0], key...)
+	cachedAESGCM = gcm
+	nonceCounter = 0
+	return gcm, nil
+}
+
+// nextNonce returns a 96-bit GCM nonce from an incrementing counter. GCM only
+// requires nonces be unique per key; a counter is far cheaper than crypto/rand
+// per chunk and doubles as an implicit chunk ordering.
+func nextNonce(size int) []byte {
+	nonce := make([]byte, size)
+	binary.BigEndian.PutUint64(nonce[:8], nonceCounter)
+	nonceCounter++
+	return nonce
+}
 
 // Error response
 type wasmError struct {
@@ -136,75 +175,72 @@ func getSessionKey(this js.Value, args []js.Value) interface{} {
 // ─── Encryption Functions ─────────────────────────────────────────────────
 
 // encrypt encrypts data using AES-256-GCM.
-// key: base64-encoded 32-byte key
-// data: base64-encoded plaintext
-// Returns: base64-encoded ciphertext (IV + ciphertext)
+// key:  Uint8Array (32 bytes)
+// aad:  Uint8Array or null (additional authenticated data; binds chunk order)
+// data: Uint8Array plaintext
+// Returns: Uint8Array (nonce || ciphertext), or a JSON error string on failure.
+//
+// Zero base64: bytes are copied directly between JS and Go via CopyBytesToGo /
+// CopyBytesToJS, and the result is a Uint8Array JS can ws.send() with no further
+// conversion. Eliminates the 4x base64 round-trips + per-byte string loops that
+// were the dominant transfer bottleneck.
 func encrypt(this js.Value, args []js.Value) interface{} {
-	if len(args) < 2 {
-		return returnError("encrypt: need key and data")
+	if len(args) < 3 {
+		return returnError("encrypt: need key (Uint8Array), aad (Uint8Array|null), data (Uint8Array)")
 	}
 
-	key, err := base64.StdEncoding.DecodeString(args[0].String())
+	key := make([]byte, args[0].Get("byteLength").Int())
+	js.CopyBytesToGo(key, args[0])
+
+	var aad []byte
+	if args[1].Truthy() {
+		aad = make([]byte, args[1].Get("byteLength").Int())
+		js.CopyBytesToGo(aad, args[1])
+	}
+
+	data := make([]byte, args[2].Get("byteLength").Int())
+	js.CopyBytesToGo(data, args[2])
+
+	aesgcm, err := getCipher(key)
 	if err != nil {
-		return returnError("encrypt: key decode failed: " + err.Error())
-	}
-	data, err := base64.StdEncoding.DecodeString(args[1].String())
-	if err != nil {
-		return returnError("encrypt: data decode failed: " + err.Error())
+		return returnError("encrypt: cipher init failed: " + err.Error())
 	}
 
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return returnError("encrypt: AES init failed: " + err.Error())
-	}
-
-	aesgcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return returnError("encrypt: GCM init failed: " + err.Error())
-	}
-
-	nonce := make([]byte, aesgcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return returnError("encrypt: nonce generation failed: " + err.Error())
-	}
-
-	ciphertext := aesgcm.Seal(nil, nonce, data, nil)
+	nonce := nextNonce(aesgcm.NonceSize())
+	ciphertext := aesgcm.Seal(nil, nonce, data, aad)
 	// Prepend nonce to ciphertext
 	result := append(nonce, ciphertext...)
-	encoded := base64.StdEncoding.EncodeToString(result)
 
-	return returnJSON(map[string]interface{}{
-		"ciphertext": encoded,
-		"size":       len(result),
-	})
+	out := js.Global().Get("Uint8Array").New(len(result))
+	js.CopyBytesToJS(out, result)
+	return out
 }
 
 // decrypt decrypts data using AES-256-GCM.
-// key: base64-encoded 32-byte key
-// data: base64-encoded ciphertext (IV + ciphertext)
-// Returns: base64-encoded plaintext
+// key: Uint8Array (32 bytes)
+// aad: Uint8Array or null (must match the encrypt AAD)
+// data: Uint8Array (nonce || ciphertext)
+// Returns: Uint8Array plaintext, or a JSON error string on failure.
 func decrypt(this js.Value, args []js.Value) interface{} {
-	if len(args) < 2 {
-		return returnError("decrypt: need key and data")
+	if len(args) < 3 {
+		return returnError("decrypt: need key (Uint8Array), aad (Uint8Array|null), data (Uint8Array)")
 	}
 
-	key, err := base64.StdEncoding.DecodeString(args[0].String())
-	if err != nil {
-		return returnError("decrypt: key decode failed: " + err.Error())
-	}
-	ciphertext, err := base64.StdEncoding.DecodeString(args[1].String())
-	if err != nil {
-		return returnError("decrypt: data decode failed: " + err.Error())
+	key := make([]byte, args[0].Get("byteLength").Int())
+	js.CopyBytesToGo(key, args[0])
+
+	var aad []byte
+	if args[1].Truthy() {
+		aad = make([]byte, args[1].Get("byteLength").Int())
+		js.CopyBytesToGo(aad, args[1])
 	}
 
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return returnError("decrypt: AES init failed: " + err.Error())
-	}
+	ciphertext := make([]byte, args[2].Get("byteLength").Int())
+	js.CopyBytesToGo(ciphertext, args[2])
 
-	aesgcm, err := cipher.NewGCM(block)
+	aesgcm, err := getCipher(key)
 	if err != nil {
-		return returnError("decrypt: GCM init failed: " + err.Error())
+		return returnError("decrypt: cipher init failed: " + err.Error())
 	}
 
 	nonceSize := aesgcm.NonceSize()
@@ -213,16 +249,14 @@ func decrypt(this js.Value, args []js.Value) interface{} {
 	}
 
 	nonce, data := ciphertext[:nonceSize], ciphertext[nonceSize:]
-	plaintext, err := aesgcm.Open(nil, nonce, data, nil)
+	plaintext, err := aesgcm.Open(nil, nonce, data, aad)
 	if err != nil {
 		return returnError("decrypt: AES-GCM open failed: " + err.Error())
 	}
 
-	encoded := base64.StdEncoding.EncodeToString(plaintext)
-	return returnJSON(map[string]interface{}{
-		"plaintext": encoded,
-		"size":      len(plaintext),
-	})
+	out := js.Global().Get("Uint8Array").New(len(plaintext))
+	js.CopyBytesToJS(out, plaintext)
+	return out
 }
 
 // ─── WASM Entry Point ─────────────────────────────────────────────────────
