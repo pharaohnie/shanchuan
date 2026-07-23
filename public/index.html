@@ -119,8 +119,11 @@
 
         <div id="send-progress-card" class="card hidden">
           <h2>
-            <svg class="icon card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
-            <span class="card-title-text">发送文件</span>
+            <span class="card-title-group">
+              <svg class="icon card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
+              <span class="card-title-text">发送文件</span>
+            </span>
+            <div id="send-transport-mode" class="transport-mode hidden"></div>
           </h2>
           <div class="code-display">
             <label>口令码（分享给接收方）</label>
@@ -133,7 +136,6 @@
             </div>
           </div>
           <div class="status-message" id="send-status">连接中...</div>
-          <div id="send-transport-mode" class="transport-mode hidden"></div>
           <div class="progress-bar-container" id="send-progress-container">
             <div class="progress-bar" id="send-progress-bar"></div>
           </div>

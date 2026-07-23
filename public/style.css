@@ -240,10 +240,12 @@ body {
 	gap: 9px;
 }
 
+#send-progress-card h2,
 #receive-progress-card h2 {
 	justify-content: space-between;
 }
 
+#send-progress-card #send-transport-mode,
 #receive-progress-card #receive-transport-mode {
 	margin-bottom: 0;
 	flex-shrink: 0;
