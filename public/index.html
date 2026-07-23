@@ -136,8 +136,13 @@
             </div>
           </div>
           <div class="status-message" id="send-status">连接中...</div>
-          <div class="progress-bar-container" id="send-progress-container">
-            <div class="progress-bar" id="send-progress-bar"></div>
+          <div class="progress-wrapper" id="send-progress-wrapper">
+            <div class="progress-percent-track">
+              <span class="progress-percent is-at-start" id="send-progress-percent">0.0%</span>
+            </div>
+            <div class="progress-bar-container" id="send-progress-container">
+              <div class="progress-bar" id="send-progress-bar"></div>
+            </div>
           </div>
         </div>
       </section>
@@ -172,11 +177,13 @@
             <div id="receive-transport-mode" class="transport-mode hidden"></div>
           </h2>
           <div class="status-message" id="receive-status">连接中...</div>
-          <div
-            class="progress-bar-container hidden"
-            id="receive-progress-container"
-          >
-            <div class="progress-bar" id="receive-progress-bar"></div>
+          <div class="progress-wrapper hidden" id="receive-progress-wrapper">
+            <div class="progress-percent-track">
+              <span class="progress-percent is-at-start" id="receive-progress-percent">0.0%</span>
+            </div>
+            <div class="progress-bar-container" id="receive-progress-container">
+              <div class="progress-bar" id="receive-progress-bar"></div>
+            </div>
           </div>
           <div id="receive-text-section" class="hidden">
             <pre id="receive-text-content" class="receive-text-content"></pre>

@@ -608,12 +608,41 @@ body {
 }
 
 /* ─── Progress Bar ──────────────────────────────────────────────────────── */
+.progress-wrapper {
+	margin-bottom: 8px;
+}
+
+.progress-percent-track {
+	position: relative;
+	height: 18px;
+	margin-bottom: 6px;
+}
+
+.progress-percent {
+	position: absolute;
+	top: 0;
+	left: 0;
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--primary);
+	white-space: nowrap;
+	transform: translateX(-50%);
+	transition: none;
+}
+
+.progress-percent.is-at-start {
+	transform: translateX(0);
+}
+
+.progress-percent.is-at-end {
+	transform: translateX(-100%);
+}
+
 .progress-bar-container {
 	height: 8px;
 	background: var(--surface-2);
 	border-radius: 999px;
 	overflow: hidden;
-	margin-bottom: 8px;
 }
 
 .progress-bar {

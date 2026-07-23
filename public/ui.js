@@ -48,6 +48,16 @@ function setTransferring(b, role) {
 	}
 }
 
+function updateProgressLabel(role, percent) {
+	const label = $(`${role}-progress-percent`);
+	if (!label) return;
+	const p = Math.min(100, Math.max(0, percent));
+	label.textContent = `${p.toFixed(1)}%`;
+	label.style.left = `${p}%`;
+	label.classList.toggle("is-at-start", p <= 8);
+	label.classList.toggle("is-at-end", p >= 92);
+}
+
 // ─── ui facade (called from app.js) ────────────────────────────────────────
 const ui = {
 	setStatus(role, text, tone = "info") {
@@ -72,18 +82,20 @@ const ui = {
 			void el.offsetWidth;
 			el.style.transition = "";
 		}
+		updateProgressLabel(role, p);
 		window.bgFX?.setProgress(p);
 		if (p >= 100) setTransferring(false);
 	},
 
 	showProgressBar(role) {
-		const container = $(`${role}-progress-container`);
+		const wrapper = $(`${role}-progress-wrapper`);
 		const bar = $(`${role}-progress-bar`);
-		if (!container || !bar) return;
+		if (!wrapper || !bar) return;
 		bar.style.transition = "none";
 		bar.style.transform = "scaleX(0)";
 		bar.classList.remove("is-complete");
-		container.classList.remove("hidden");
+		wrapper.classList.remove("hidden");
+		updateProgressLabel(role, 0);
 		void bar.offsetWidth;
 		bar.style.transition = "";
 	},

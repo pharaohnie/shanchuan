@@ -52,21 +52,12 @@ function progressPercent(globalChunk, batchTotal) {
 	return batchTotal > 0 ? (globalChunk / batchTotal) * 100 : 100;
 }
 
-function formatTransferProgress(
-	role,
-	fileIndex,
-	fileCount,
-	fileName,
-	globalChunk,
-	batchTotal,
-) {
+function formatTransferProgress(role, fileIndex, fileCount, fileName) {
 	const verb = role === "send" ? "发送中" : "接收中";
-	const pct = progressPercent(globalChunk, batchTotal).toFixed(1);
-	const progressPart = `${pct}%`;
 	if (fileCount > 1) {
-		return `${verb} ${fileIndex + 1}/${fileCount} · ${fileName} · ${progressPart}`;
+		return `${verb} ${fileIndex + 1}/${fileCount} · ${fileName}`;
 	}
-	return `${verb}... ${progressPart}`;
+	return `${verb}...`;
 }
 
 function receiveGlobalChunk() {
@@ -84,8 +75,6 @@ function updateReceiveProgressUI() {
 			state.fileIndex,
 			state.fileCount,
 			name,
-			global,
-			batchTotal,
 		),
 		"progress",
 	);
@@ -648,8 +637,6 @@ async function sendOneFile(transport, file, fileIndex, fileCount, batchTotalChun
 				fileIndex,
 				fileCount,
 				file.name,
-				global,
-				batchTotalChunks,
 			),
 			"progress",
 		);
