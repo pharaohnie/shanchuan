@@ -223,12 +223,13 @@ function updateTextSendReady() {
 	if (bytes.length > croc.MAX_TEXT_BYTES) {
 		countEl.textContent = `${formatSize(bytes.length)}（超过 1MB 限制）`;
 		btn.disabled = true;
+		$("send-file-list").innerHTML = "";
+		$("send-file-total-size").textContent = "";
 		$("send-file-info").classList.remove("hidden");
 		return;
 	}
 	$("send-file-list").innerHTML = "";
-	$("send-file-total-size").textContent =
-		`${charCount} 字符 · ${formatSize(bytes.length)}`;
+	$("send-file-total-size").textContent = "";
 	$("send-file-info").classList.remove("hidden");
 	btn.disabled = false;
 }
