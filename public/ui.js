@@ -7,6 +7,35 @@
 
 const $ = (id) => document.getElementById(id);
 
+// ─── Inline SVG icons (Lucide-style, 24×24 stroke) ────────────────────────
+const ICONS = {
+	send: '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>',
+	inbox: '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+	rocket: '<path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/>',
+	copy: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+	check: '<path d="M20 6 9 17l-5-5"/>',
+	download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>',
+	loader: '<path d="M21 12a9 9 0 1 1-6.219-8.56"/>',
+	"circle-check": '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+	"circle-x": '<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>',
+	"key-round": '<path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/>',
+	hourglass: '<path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/>',
+};
+
+function svgIcon(name, cls = "") {
+	return `<svg class="icon ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+}
+
+// status tone → icon + color class
+const STATUS_TONES = {
+	working: { icon: "loader", cls: "status-working" },
+	success: { icon: "circle-check", cls: "status-success" },
+	error: { icon: "circle-x", cls: "status-error" },
+	key: { icon: "key-round", cls: "status-key" },
+	wait: { icon: "hourglass", cls: "status-wait" },
+	info: { icon: null, cls: "" },
+};
+
 let transferring = false;
 
 function setTransferring(b, role) {
@@ -20,9 +49,13 @@ function setTransferring(b, role) {
 
 // ─── ui facade (called from app.js) ────────────────────────────────────────
 const ui = {
-	setStatus(role, text) {
+	setStatus(role, text, tone = "info") {
 		const el = $(`${role}-status`);
-		if (el) el.textContent = text;
+		if (!el) return;
+		const t = STATUS_TONES[tone] || STATUS_TONES.info;
+		el.className = `status-message ${t.cls}`.trim();
+		el.innerHTML = (t.icon ? svgIcon(t.icon) : "") + "<span></span>";
+		el.querySelector("span").textContent = text;
 	},
 
 	setProgress(role, percent, animate = false) {
@@ -57,9 +90,8 @@ const ui = {
 	},
 
 	setCardTitle(role, text) {
-		const card = $(`${role}-progress-card`);
-		const h2 = card?.querySelector("h2");
-		if (h2) h2.textContent = text;
+		const el = $(`${role}-progress-card`)?.querySelector(".card-title-text");
+		if (el) el.textContent = text;
 	},
 
 	setCode(code) {
@@ -81,7 +113,7 @@ const ui = {
 			alert(message);
 			return;
 		}
-		this.setStatus(role, `❌ ${message}`);
+		this.setStatus(role, message, "error");
 		setTransferring(false);
 	},
 
@@ -90,10 +122,11 @@ const ui = {
 		if (!btn) return;
 		btn.disabled = busy;
 		if (busy) {
-			btn.dataset.idleLabel = btn.textContent;
-			btn.textContent = role === "send" ? "⏳ 连接中继..." : "⏳ 连接中...";
-		} else if (btn.dataset.idleLabel) {
-			btn.textContent = btn.dataset.idleLabel;
+			btn.dataset.idleHtml = btn.innerHTML;
+			const label = role === "send" ? "连接中继…" : "连接中…";
+			btn.innerHTML = `${svgIcon("loader", "spin")}<span>${label}</span>`;
+		} else if (btn.dataset.idleHtml) {
+			btn.innerHTML = btn.dataset.idleHtml;
 		}
 	},
 
@@ -108,10 +141,7 @@ const ui = {
 		$("receive-text-section").classList.remove("hidden");
 		$("btn-copy-text").onclick = () => {
 			navigator.clipboard.writeText(text).then(() => {
-				const btn = $("btn-copy-text");
-				const prev = btn.textContent;
-				btn.textContent = "✅ 已复制";
-				setTimeout(() => (btn.textContent = prev), 2000);
+				flashCopied($("btn-copy-text"));
 			});
 		};
 	},
@@ -122,7 +152,10 @@ const ui = {
 		for (const f of files) {
 			const btn = document.createElement("button");
 			btn.className = "btn btn-success";
-			btn.textContent = `⬇️ ${f.name}`;
+			btn.innerHTML = svgIcon("download");
+			const name = document.createElement("span");
+			name.textContent = f.name;
+			btn.appendChild(name);
 			btn.onclick = () => {
 				const a = document.createElement("a");
 				a.href = f.url;
@@ -235,12 +268,16 @@ function onFilesSelected(fileList) {
 	setSendModeUI("file");
 }
 
+function flashCopied(btn) {
+	const prev = btn.innerHTML;
+	btn.innerHTML = `${svgIcon("check")}<span>已复制</span>`;
+	setTimeout(() => (btn.innerHTML = prev), 2000);
+}
+
 function copyCode() {
 	const code = $("send-code").textContent;
 	navigator.clipboard.writeText(code).then(() => {
-		const btn = $("btn-copy-code");
-		btn.textContent = "✅ 已复制";
-		setTimeout(() => (btn.textContent = "📋 复制"), 2000);
+		flashCopied($("btn-copy-code"));
 	});
 }
 

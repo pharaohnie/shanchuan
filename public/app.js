@@ -60,14 +60,13 @@ function formatTransferProgress(
 	globalChunk,
 	batchTotal,
 ) {
-	const icon = role === "send" ? "📤" : "📥";
 	const verb = role === "send" ? "发送中" : "接收中";
 	const pct = progressPercent(globalChunk, batchTotal).toFixed(1);
 	const chunkPart = `Chunk ${globalChunk}/${batchTotal} (${pct}%)`;
 	if (fileCount > 1) {
-		return `${icon} ${verb} ${fileIndex + 1}/${fileCount} · ${fileName} · ${chunkPart}`;
+		return `${verb} ${fileIndex + 1}/${fileCount} · ${fileName} · ${chunkPart}`;
 	}
-	return `${icon} ${verb}... ${chunkPart}`;
+	return `${verb}... ${chunkPart}`;
 }
 
 function receiveGlobalChunk() {
@@ -88,6 +87,7 @@ function updateReceiveProgressUI() {
 			global,
 			batchTotal,
 		),
+		"working",
 	);
 	ui.setProgress("receive", progressPercent(global, batchTotal));
 }
@@ -366,11 +366,11 @@ async function startSend(text) {
 	ui.enterTransfer("send");
 	let fileLabel;
 	if (state.textSend) {
-		fileLabel = "📤 发送文本";
+		fileLabel = "发送文本";
 	} else if (state.files.length === 1) {
-		fileLabel = "📤 发送文件";
+		fileLabel = "发送文件";
 	} else {
-		fileLabel = `📤 发送 ${state.files.length} 个文件`;
+		fileLabel = `发送 ${state.files.length} 个文件`;
 	}
 	ui.setCardTitle("send", fileLabel);
 
@@ -390,7 +390,7 @@ async function startReceive(code) {
 	state.role = "receiver";
 
 	ui.enterTransfer("receive");
-	ui.setCardTitle("receive", "📥 接收文件");
+	ui.setCardTitle("receive", "接收文件");
 	ui.resetReceiveView();
 	ui.setBusy("receive", true);
 
@@ -463,7 +463,7 @@ async function connectAndTransfer() {
 					if (msg.type === "waiting") {
 						pakeState = "waiting";
 						if (state.role === "sender") {
-							ui.setStatus("send", "⏳ 等待接收方输入口令码...");
+							ui.setStatus("send", "等待接收方输入口令码…", "wait");
 						}
 					} else if (msg.type === "paired") {
 						pakeState = "paired";
@@ -511,7 +511,11 @@ async function connectAndTransfer() {
 
 		// ─── PAKE init (sender sends the first PAKE message) ───────────────
 		async function runPAKEInit() {
-			ui.setStatus(state.role === "sender" ? "send" : "receive", "🔐 正在协商加密密钥...");
+			ui.setStatus(
+				state.role === "sender" ? "send" : "receive",
+				"正在协商加密密钥…",
+				"key",
+			);
 			const role = state.role === "sender" ? 0 : 1;
 			await wasmCall("wasmInitPAKE", role, state.code);
 			pakeState = "pake";
@@ -536,7 +540,7 @@ async function connectAndTransfer() {
 					state.sessionKeyBytes = base64ToUint8Array(keyResult.key);
 
 					if (state.role === "sender") {
-						ui.setStatus("send", "🔑 密钥已建立，协商 P2P 连接...");
+						ui.setStatus("send", "密钥已建立，协商 P2P 连接…", "key");
 						const transport = await setupSenderTransport(
 							ws,
 							(n) => {
@@ -544,12 +548,12 @@ async function connectAndTransfer() {
 							},
 							flushPendingSignaling,
 						);
-						ui.setStatus("send", "🔑 密钥已建立，开始发送文件...");
+						ui.setStatus("send", "密钥已建立，开始发送文件…", "key");
 						await sendAllFiles(transport);
 						resolveOnce();
 						ws.close();
 					} else {
-						ui.setStatus("receive", "🔑 密钥已建立，协商 P2P 连接...");
+						ui.setStatus("receive", "密钥已建立，协商 P2P 连接…", "key");
 						state._metadataReceived = false;
 						state.merged = null;
 						state.mergeOffset = 0;
@@ -599,10 +603,11 @@ async function sendAllFiles(transport) {
 	ui.setStatus(
 		"send",
 		state.textSend
-			? "✅ 文本发送完成！"
+			? "文本发送完成！"
 			: fileCount > 1
-				? `✅ ${fileCount} 个文件发送完成！`
-				: "✅ 文件发送完成！",
+				? `${fileCount} 个文件发送完成！`
+				: "文件发送完成！",
+		"success",
 	);
 	ui.setProgress("send", 100, true);
 	state.textSend = false;
@@ -646,6 +651,7 @@ async function sendOneFile(transport, file, fileIndex, fileCount, batchTotalChun
 				global,
 				batchTotalChunks,
 			),
+			"working",
 		);
 		ui.setProgress("send", progressPercent(global, batchTotalChunks));
 	};
@@ -712,17 +718,19 @@ async function finishCurrentFile() {
 		ui.setStatus(
 			"receive",
 			state.fileCount > 1
-				? `✅ 已接收 ${state.fileCount} 个文件`
-				: "✅ 文件已保存到磁盘！",
+				? `已接收 ${state.fileCount} 个文件`
+				: "文件已保存到磁盘！",
+			"success",
 		);
 	} else if (metadata.kind === "text") {
-		ui.setStatus("receive", "✅ 文本已接收");
+		ui.setStatus("receive", "文本已接收", "success");
 	} else {
 		ui.setStatus(
 			"receive",
 			state.fileCount > 1
-				? `✅ 已接收 ${state.fileCount} 个文件`
-				: "✅ 文件接收完成！",
+				? `已接收 ${state.fileCount} 个文件`
+				: "文件接收完成！",
+			"success",
 		);
 		ui.showDownloads(state.receivedFiles);
 	}
@@ -800,7 +808,7 @@ async function handleReceivedData(data) {
 		}
 
 		if (isText) {
-			ui.setCardTitle("receive", "📥 接收文本");
+			ui.setCardTitle("receive", "接收文本");
 		}
 		ui.showProgressBar("receive");
 		updateReceiveProgressUI();

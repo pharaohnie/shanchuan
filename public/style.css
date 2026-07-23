@@ -50,6 +50,17 @@ body {
 	display: none !important;
 }
 
+/* ─── Icons ─────────────────────────────────────────────────────────────── */
+.icon {
+	width: 1.1em;
+	height: 1.1em;
+	flex-shrink: 0;
+}
+
+.spin {
+	animation: spin 1s linear infinite;
+}
+
 /* ─── Loading Overlay ───────────────────────────────────────────────────── */
 .loading-overlay {
 	position: fixed;
@@ -101,9 +112,10 @@ body {
 	margin-bottom: 6px;
 }
 
-.logo-icon {
-	font-size: 34px;
-	filter: drop-shadow(0 0 12px rgba(34, 211, 238, 0.5));
+.logo-croc {
+	width: 52px;
+	height: 26px;
+	filter: drop-shadow(0 0 10px rgba(34, 211, 238, 0.45));
 }
 
 .logo h1 {
@@ -151,6 +163,10 @@ body {
 	flex: 1;
 	position: relative;
 	z-index: 1;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 7px;
 	background: none;
 	border: none;
 	color: var(--text-muted);
@@ -211,8 +227,17 @@ body {
 }
 
 .card h2 {
+	display: flex;
+	align-items: center;
+	gap: 9px;
 	font-size: 18px;
 	margin-bottom: 16px;
+}
+
+.card-icon {
+	width: 20px;
+	height: 20px;
+	color: var(--primary);
 }
 
 .help-text {
@@ -273,8 +298,9 @@ body {
 }
 
 .drop-icon {
-	font-size: 36px;
-	display: block;
+	width: 40px;
+	height: 40px;
+	color: var(--primary);
 	margin-bottom: 10px;
 }
 
@@ -369,6 +395,10 @@ body {
 
 /* ─── Buttons ───────────────────────────────────────────────────────────── */
 .btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 7px;
 	border: none;
 	border-radius: var(--radius-sm);
 	font-size: 14px;
@@ -422,7 +452,7 @@ body {
 	background: linear-gradient(120deg, var(--success), #10b981);
 	color: #04120c;
 	width: 100%;
-	text-align: left;
+	justify-content: flex-start;
 }
 
 .btn-success:hover {
@@ -496,10 +526,42 @@ body {
 
 /* ─── Status & Transport Mode ───────────────────────────────────────────── */
 .status-message {
+	display: flex;
+	align-items: center;
+	gap: 8px;
 	font-size: 14px;
 	margin: 12px 0;
 	min-height: 22px;
 	word-break: break-all;
+}
+
+.status-message .icon {
+	width: 17px;
+	height: 17px;
+}
+
+.status-working {
+	color: var(--primary);
+}
+
+.status-working .icon {
+	animation: spin 1s linear infinite;
+}
+
+.status-success {
+	color: var(--success);
+}
+
+.status-error {
+	color: var(--danger);
+}
+
+.status-key {
+	color: var(--primary);
+}
+
+.status-wait {
+	color: var(--text-muted);
 }
 
 .transport-mode {
