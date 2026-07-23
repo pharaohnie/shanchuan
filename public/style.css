@@ -234,6 +234,21 @@ body {
 	margin-bottom: 16px;
 }
 
+.card-title-group {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+}
+
+#receive-progress-card h2 {
+	justify-content: space-between;
+}
+
+#receive-progress-card #receive-transport-mode {
+	margin-bottom: 0;
+	flex-shrink: 0;
+}
+
 .card-icon {
 	width: 20px;
 	height: 20px;

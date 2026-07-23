@@ -63,17 +63,28 @@ const ui = {
 		if (!el) return;
 		const p = Math.min(100, Math.max(0, percent));
 		el.classList.toggle("is-complete", animate);
+		if (!animate) {
+			el.style.transition = "none";
+		}
 		el.style.transform = `scaleX(${p / 100})`;
+		if (!animate) {
+			void el.offsetWidth;
+			el.style.transition = "";
+		}
 		window.bgFX?.setProgress(p);
 		if (p >= 100) setTransferring(false);
 	},
 
 	showProgressBar(role) {
 		const container = $(`${role}-progress-container`);
-		if (!container) return;
+		const bar = $(`${role}-progress-bar`);
+		if (!container || !bar) return;
+		bar.style.transition = "none";
+		bar.style.transform = "scaleX(0)";
+		bar.classList.remove("is-complete");
 		container.classList.remove("hidden");
-		// Force reflow so the progress bar transition starts from 0.
-		void $(`${role}-progress-bar`).offsetWidth;
+		void bar.offsetWidth;
+		bar.style.transition = "";
 	},
 
 	setTransportMode(role, mode) {

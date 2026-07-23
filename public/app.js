@@ -62,11 +62,14 @@ function formatTransferProgress(
 ) {
 	const verb = role === "send" ? "发送中" : "接收中";
 	const pct = progressPercent(globalChunk, batchTotal).toFixed(1);
-	const chunkPart = `Chunk ${globalChunk}/${batchTotal} (${pct}%)`;
+	const progressPart =
+		role === "receive"
+			? `${pct}%`
+			: `Chunk ${globalChunk}/${batchTotal} (${pct}%)`;
 	if (fileCount > 1) {
-		return `${verb} ${fileIndex + 1}/${fileCount} · ${fileName} · ${chunkPart}`;
+		return `${verb} ${fileIndex + 1}/${fileCount} · ${fileName} · ${progressPart}`;
 	}
-	return `${verb}... ${chunkPart}`;
+	return `${verb}... ${progressPart}`;
 }
 
 function receiveGlobalChunk() {
