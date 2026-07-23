@@ -29,6 +29,7 @@ function svgIcon(name, cls = "") {
 // status tone → icon + color class
 const STATUS_TONES = {
 	working: { icon: "loader", cls: "status-working" },
+	progress: { icon: null, cls: "status-working" },
 	success: { icon: "circle-check", cls: "status-success" },
 	error: { icon: "circle-x", cls: "status-error" },
 	key: { icon: "key-round", cls: "status-key" },

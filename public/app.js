@@ -90,7 +90,7 @@ function updateReceiveProgressUI() {
 			global,
 			batchTotal,
 		),
-		"working",
+		"progress",
 	);
 	ui.setProgress("receive", progressPercent(global, batchTotal));
 }
