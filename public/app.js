@@ -51,6 +51,14 @@ function progressPercent(globalChunk, batchTotal) {
 	return batchTotal > 0 ? (globalChunk / batchTotal) * 100 : 100;
 }
 
+function hideProgressBar(role) {
+	if (typeof window.ui?.hideProgressBar === "function") {
+		window.ui.hideProgressBar(role);
+	} else {
+		document.getElementById(`${role}-progress-wrapper`)?.classList.add("hidden");
+	}
+}
+
 function formatTransferProgress(role, fileIndex, fileCount, fileName) {
 	const verb = role === "send" ? "发送中" : "接收中";
 	if (fileCount > 1) {
@@ -64,6 +72,7 @@ function receiveGlobalChunk() {
 }
 
 function updateReceiveProgressUI() {
+	if (state.isTextPayload) return;
 	const global = receiveGlobalChunk();
 	const batchTotal = state.batchTotalChunks;
 	const name = state.receivedMetadata?.name ?? "";
@@ -391,6 +400,10 @@ async function startSend(text) {
 	}
 	ui.setCardTitle("send", fileLabel);
 
+	if (state.textSend) {
+		hideProgressBar("send");
+	}
+
 	try {
 		await connectAndTransfer();
 	} catch (err) {
@@ -618,7 +631,11 @@ async function sendAllFiles(transport) {
 	const files = state.files;
 	const fileCount = files.length;
 	const batchTotalChunks = batchTotalChunksForFiles(files, transport);
-	ui.setProgress("send", 0);
+	if (state.textSend) {
+		ui.setStatus("send", "正在发送文本…", "progress");
+	} else {
+		ui.setProgress("send", 0);
+	}
 	for (let i = 0; i < fileCount; i++) {
 		await sendOneFile(transport, files[i], i, fileCount, batchTotalChunks);
 	}
@@ -657,6 +674,7 @@ async function sendOneFile(transport, file, fileIndex, fileCount, batchTotalChun
 	transport.send(metadataEnc);
 
 	const updateSendProgress = (chunkInFile) => {
+		if (state.textSend) return;
 		const global = batchGlobalChunks(
 			fileIndex,
 			chunkInFile,
@@ -831,9 +849,12 @@ async function handleReceivedData(data) {
 
 		if (isText) {
 			ui.setCardTitle("receive", "接收文本");
+			hideProgressBar("receive");
+			ui.setStatus("receive", "正在接收文本…", "progress");
+		} else {
+			ui.showProgressBar("receive");
+			updateReceiveProgressUI();
 		}
-		ui.showProgressBar("receive");
-		updateReceiveProgressUI();
 
 		if (metadata.chunks === 0) {
 			await finishCurrentFile();

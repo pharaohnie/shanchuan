@@ -100,6 +100,10 @@ const ui = {
 		bar.style.transition = "";
 	},
 
+	hideProgressBar(role) {
+		$(`${role}-progress-wrapper`)?.classList.add("hidden");
+	},
+
 	setTransportMode(role, mode) {
 		const el = $(`${role}-transport-mode`);
 		if (!el) return;
