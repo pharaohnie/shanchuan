@@ -178,7 +178,7 @@ body {
 }
 
 .app-header {
-	margin-bottom: var(--space-xl);
+	margin-bottom: 0;
 	padding-bottom: var(--space-md);
 	border-bottom: 1px solid var(--rule);
 	animation: fade-up 0.4s ease both;
