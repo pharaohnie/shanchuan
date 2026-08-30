@@ -53,10 +53,10 @@ client:
     # 使用公网 IP：turn.sc.bjedu.pro 需单独 A 记录指向 172，未配置 DNS 时域名无法解析
     - urls: "turn:turn.sc.bjedu.pro:3478?transport=udp"
       username: "shanchuan"
-      credential: "j080mbaeIL7PlBBtQm7bedcc"
+      credential: "sodijsoODjsojcxce"
     - urls: "turn:turn.sc.bjedu.pro:3478?transport=tcp"
       username: "shanchuan"
-      credential: "j080mbaeIL7PlBBtQm7bedcc"
+      credential: "sodijsoODjsojcxce"
 
 rate_limit:
   # 每个 IP 每分钟允许的中继房间 join 次数（防暴力枚举口令）
