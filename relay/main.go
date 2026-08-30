@@ -87,8 +87,9 @@ func handleConfigAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ClientAPIResponse{
-		RelayURL:  cfg.Client.RelayURL,
-		PublicURL: cfg.Client.PublicURL,
+		RelayURL:   cfg.Client.RelayURL,
+		PublicURL:  cfg.Client.PublicURL,
+		IceServers: cfg.Client.IceServers,
 	})
 }
 

@@ -82,7 +82,12 @@ func TestHandleConfigAPI(t *testing.T) {
 	oldCfg := cfg
 	t.Cleanup(func() { cfg = oldCfg })
 	cfg = Config{
-		Client: ClientConfig{RelayURL: "wss://relay.test/ws"},
+		Client: ClientConfig{
+			RelayURL: "wss://relay.test/ws",
+			IceServers: []IceServerConfig{
+				{URLs: "turn:turn.test:3478", Username: "u", Credential: "p"},
+			},
+		},
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
@@ -93,6 +98,9 @@ func TestHandleConfigAPI(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "wss://relay.test/ws") {
 		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "turn:turn.test:3478") {
+		t.Fatalf("expected ice_servers in body: %s", rec.Body.String())
 	}
 }
 

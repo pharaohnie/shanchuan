@@ -123,18 +123,26 @@ const state = {
 };
 
 let relayUrlPromise = null;
+let iceServersPromise = null;
+
+async function loadClientConfig() {
+	try {
+		const resp = await fetch("/api/config");
+		if (resp.ok) {
+			return await resp.json();
+		}
+	} catch (err) {
+		crocLog.warn("config", "Failed to load relay config:", err);
+	}
+	return null;
+}
 
 async function getRelayURL() {
 	if (!relayUrlPromise) {
 		relayUrlPromise = (async () => {
-			try {
-				const resp = await fetch("/api/config");
-				if (resp.ok) {
-					const data = await resp.json();
-					return crocSecurity.deriveRelayURL(data.relay_url);
-				}
-			} catch (err) {
-				crocLog.warn("config", "Failed to load relay config, using default:", err);
+			const data = await loadClientConfig();
+			if (data) {
+				return crocSecurity.deriveRelayURL(data.relay_url);
 			}
 			return crocSecurity.deriveRelayURL("");
 		})();
@@ -149,22 +157,29 @@ let publicUrlPromise = null;
 async function getPublicURL() {
 	if (!publicUrlPromise) {
 		publicUrlPromise = (async () => {
-			try {
-				const resp = await fetch("/api/config");
-				if (resp.ok) {
-					const data = await resp.json();
-					const pub = data.public_url;
-					if (pub && typeof pub === "string" && pub.trim()) {
-						return pub.trim().replace(/\/+$/, "");
-					}
-				}
-			} catch (err) {
-				crocLog.warn("config", "Failed to load relay config, using page origin:", err);
+			const data = await loadClientConfig();
+			const pub = data?.public_url;
+			if (pub && typeof pub === "string" && pub.trim()) {
+				return pub.trim().replace(/\/+$/, "");
 			}
 			return window.location.origin;
 		})();
 	}
 	return publicUrlPromise;
+}
+
+async function ensureIceServersLoaded() {
+	if (!iceServersPromise) {
+		iceServersPromise = (async () => {
+			const data = await loadClientConfig();
+			const servers = data?.ice_servers;
+			if (Array.isArray(servers) && servers.length > 0) {
+				setIceServers(servers);
+				crocLog.log("config", "ICE servers loaded:", servers.length);
+			}
+		})();
+	}
+	return iceServersPromise;
 }
 
 // ─── Worker Bridge ────────────────────────────────────────────────────────
@@ -280,7 +295,8 @@ let stunPrecheckStarted = null;
 
 function startStunPrecheck() {
 	if (!stunPrecheckStarted) {
-		stunPrecheckStarted = checkStunConnectivity()
+		stunPrecheckStarted = ensureIceServersLoaded()
+			.then(() => checkStunConnectivity())
 			.then(reportStunCheck)
 			.then((r) => {
 				state.stunReachable = r.ok;
@@ -291,7 +307,7 @@ function startStunPrecheck() {
 				crocLog.warn("stun", "precheck failed:", err.message);
 				return {
 					ok: false,
-					server: STUN_SERVER,
+					server: primaryStunLabel(),
 					elapsedMs: 0,
 					candidateTypes: [],
 					error: err.message,

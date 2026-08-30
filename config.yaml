@@ -46,6 +46,17 @@ client:
   # 用途：发送端“复制链接”按钮生成的完整分享链接以此为前缀，如 http://sc.bjedu.pro/#code=XXXX
   # 留空时，前端回退用当前页面 origin（location.origin）拼接
   public_url: "https://sc.bjedu.pro"
+  # WebRTC ICE 服务器（经 /api/config 下发给前端）
+  # credential 须与 deploy/coturn/turnserver.conf 中 user= 密码一致
+  ice_servers:
+    - urls: "stun:stun.cloudflare.com:3478"
+    # 使用公网 IP：turn.sc.bjedu.pro 需单独 A 记录指向 172，未配置 DNS 时域名无法解析
+    - urls: "turn:turn.sc.bjedu.pro:3478?transport=udp"
+      username: "shanchuan"
+      credential: "j080mbaeIL7PlBBtQm7bedcc"
+    - urls: "turn:turn.sc.bjedu.pro:3478?transport=tcp"
+      username: "shanchuan"
+      credential: "j080mbaeIL7PlBBtQm7bedcc"
 
 rate_limit:
   # 每个 IP 每分钟允许的中继房间 join 次数（防暴力枚举口令）

@@ -18,6 +18,11 @@ websocket:
     - "https://example.com"
 client:
   relay_url: "wss://relay.example.com/ws"
+  ice_servers:
+    - urls: "stun:stun.example.com:3478"
+    - urls: "turn:turn.example.com:3478"
+      username: "user"
+      credential: "pass"
 rate_limit:
   join_per_minute: 5
   stun_check_per_minute: 2
@@ -32,6 +37,12 @@ rate_limit:
 	}
 	if cfg.Client.RelayURL != "wss://relay.example.com/ws" {
 		t.Fatalf("relay_url: got %q", cfg.Client.RelayURL)
+	}
+	if len(cfg.Client.IceServers) != 2 {
+		t.Fatalf("ice_servers: got %d entries", len(cfg.Client.IceServers))
+	}
+	if cfg.Client.IceServers[1].Username != "user" || cfg.Client.IceServers[1].Credential != "pass" {
+		t.Fatalf("turn credentials: got %+v", cfg.Client.IceServers[1])
 	}
 	if cfg.RateLimit.JoinPerMinute != 5 {
 		t.Fatalf("join limit: got %d", cfg.RateLimit.JoinPerMinute)

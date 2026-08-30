@@ -34,9 +34,16 @@ type WebSocketConfig struct {
 	AllowedOrigins []string `yaml:"allowed_origins"`
 }
 
+type IceServerConfig struct {
+	URLs       string `yaml:"urls" json:"urls"`
+	Username   string `yaml:"username,omitempty" json:"username,omitempty"`
+	Credential string `yaml:"credential,omitempty" json:"credential,omitempty"`
+}
+
 type ClientConfig struct {
-	RelayURL  string `yaml:"relay_url"`
-	PublicURL string `yaml:"public_url"`
+	RelayURL   string            `yaml:"relay_url"`
+	PublicURL  string            `yaml:"public_url"`
+	IceServers []IceServerConfig `yaml:"ice_servers"`
 }
 
 type RateLimitConfig struct {
@@ -52,8 +59,9 @@ type SecurityConfig struct {
 
 // ClientAPIResponse is returned by GET /api/config (public fields only).
 type ClientAPIResponse struct {
-	RelayURL  string `json:"relay_url"`
-	PublicURL string `json:"public_url"`
+	RelayURL   string            `json:"relay_url"`
+	PublicURL  string            `json:"public_url"`
+	IceServers []IceServerConfig `json:"ice_servers,omitempty"`
 }
 
 var trustedProxyNets []*net.IPNet

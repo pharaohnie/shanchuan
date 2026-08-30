@@ -1,25 +1,88 @@
-// WebRTC P2P negotiation: Cloudflare STUN, offer/answer/ICE via WebSocket signaling.
+// WebRTC P2P negotiation: ICE servers from /api/config, offer/answer/ICE via WebSocket signaling.
 
-const ICE_SERVERS = [{ urls: "stun:stun.cloudflare.com:3478" }];
-const STUN_SERVER = "stun.cloudflare.com:3478";
+const DEFAULT_ICE_SERVERS = [{ urls: "stun:stun.cloudflare.com:3478" }];
 const P2P_CONNECT_TIMEOUT_MS = 15000;
+const P2P_CONNECT_TIMEOUT_WITH_TURN_MS = 30000;
 const STUN_CHECK_TIMEOUT_MS = 5000;
 
+let iceServers = DEFAULT_ICE_SERVERS.slice();
 let stunCheckPromise = null;
+
+function normalizeIceServer(entry) {
+	if (!entry || !entry.urls) return null;
+	const normalized = { urls: entry.urls };
+	if (entry.username) normalized.username = entry.username;
+	if (entry.credential) normalized.credential = entry.credential;
+	return normalized;
+}
+
+function setIceServers(servers) {
+	if (!Array.isArray(servers) || servers.length === 0) return;
+	const next = servers.map(normalizeIceServer).filter(Boolean);
+	if (next.length === 0) return;
+	iceServers = next;
+	stunCheckPromise = null;
+}
+
+function getIceServers() {
+	return iceServers.slice();
+}
+
+function hasTurnConfigured() {
+	for (const s of iceServers) {
+		const urls =
+			typeof s.urls === "string"
+				? [s.urls]
+				: Array.isArray(s.urls)
+					? s.urls
+					: [];
+		for (const u of urls) {
+			if (u.startsWith("turn:") || u.startsWith("turns:")) return true;
+		}
+	}
+	return false;
+}
+
+function p2pConnectTimeoutMs() {
+	return hasTurnConfigured()
+		? P2P_CONNECT_TIMEOUT_WITH_TURN_MS
+		: P2P_CONNECT_TIMEOUT_MS;
+}
+
+function primaryStunLabel() {
+	for (const s of iceServers) {
+		const urls =
+			typeof s.urls === "string"
+				? [s.urls]
+				: Array.isArray(s.urls)
+					? s.urls
+					: [];
+		for (const u of urls) {
+			if (u.startsWith("stun:")) return u.slice("stun:".length);
+		}
+	}
+	return "stun.cloudflare.com:3478";
+}
+
+function icePrecheckPassed(candidateTypes) {
+	if (candidateTypes.has("srflx")) return true;
+	if (candidateTypes.has("relay") && hasTurnConfigured()) return true;
+	return false;
+}
 
 function candidateTypeFromLine(line) {
 	const m = line.match(/\btyp (\w+)/);
 	return m ? m[1] : "unknown";
 }
 
-// Probe Cloudflare STUN via ICE gathering. ok when at least one srflx candidate appears.
+// Probe ICE gathering: ok when srflx appears, or relay when TURN is configured.
 function checkStunConnectivity() {
 	if (stunCheckPromise) return stunCheckPromise;
 
 	stunCheckPromise = (async () => {
 		const started = Date.now();
 		const candidateTypes = new Set();
-		const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+		const pc = new RTCPeerConnection({ iceServers });
 		pc.createDataChannel("stun-probe");
 
 		return new Promise((resolve) => {
@@ -31,7 +94,7 @@ function checkStunConnectivity() {
 				pc.close();
 				resolve({
 					ok,
-					server: STUN_SERVER,
+					server: primaryStunLabel(),
 					elapsedMs: Date.now() - started,
 					candidateTypes: [...candidateTypes],
 					error: error || undefined,
@@ -50,7 +113,7 @@ function checkStunConnectivity() {
 						candidateTypeFromLine(e.candidate.candidate);
 					candidateTypes.add(typ);
 				} else {
-					finish(candidateTypes.has("srflx"));
+					finish(icePrecheckPassed(candidateTypes));
 				}
 			};
 
@@ -89,8 +152,17 @@ class P2pNegotiator {
 		this.ws.send(JSON.stringify(obj));
 	}
 
+	_resetConnectTimeout() {
+		if (this._resolved) return;
+		clearTimeout(this._timeout);
+		this._timeout = setTimeout(
+			() => this._resolve("relay", null, "timeout"),
+			p2pConnectTimeoutMs(),
+		);
+	}
+
 	async start() {
-		this.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+		this.pc = new RTCPeerConnection({ iceServers });
 
 		this.pc.onicecandidate = (e) => {
 			if (e.candidate) {
@@ -102,8 +174,12 @@ class P2pNegotiator {
 		};
 
 		this.pc.oniceconnectionstatechange = () => {
-			if (this.pc?.iceConnectionState === "failed") {
-				this._resolve("relay", null);
+			const st = this.pc?.iceConnectionState;
+			if (typeof crocLog !== "undefined") {
+				crocLog.log(this.role, "ICE state:", st);
+			}
+			if (st === "failed") {
+				this._resolve("relay", null, "ice-failed");
 			}
 		};
 
@@ -120,17 +196,14 @@ class P2pNegotiator {
 			};
 		}
 
-		this._timeout = setTimeout(
-			() => this._resolve("relay", null),
-			P2P_CONNECT_TIMEOUT_MS,
-		);
+		this._resetConnectTimeout();
 	}
 
 	_setupDataChannel(dc) {
 		dc.binaryType = "arraybuffer";
 		dc.onopen = () => {
 			if (this._resolved) return;
-			this._resolve("p2p", new P2pTransport(dc));
+			this._resolve("p2p", new P2pTransport(dc), "datachannel-open");
 		};
 	}
 
@@ -156,6 +229,7 @@ class P2pNegotiator {
 					type: "webrtc-answer",
 					sdp: this.pc.localDescription,
 				});
+				this._resetConnectTimeout();
 				return true;
 			}
 			case "webrtc-answer": {
@@ -163,6 +237,7 @@ class P2pNegotiator {
 				await this.pc.setRemoteDescription(msg.sdp);
 				this.remoteDescriptionSet = true;
 				await this._flushCandidates();
+				this._resetConnectTimeout();
 				return true;
 			}
 			case "ice-candidate": {
@@ -177,7 +252,7 @@ class P2pNegotiator {
 			}
 			case "transport-mode": {
 				if (msg.mode === "relay") {
-					this._resolve("relay", null);
+					this._resolve("relay", null, "peer-relay");
 				}
 				return true;
 			}
@@ -186,12 +261,12 @@ class P2pNegotiator {
 		}
 	}
 
-	_resolve(mode, p2pTransport) {
+	_resolve(mode, p2pTransport, reason) {
 		if (this._resolved) return;
 		this._resolved = true;
 		clearTimeout(this._timeout);
 		if (typeof crocLog !== "undefined") {
-			crocLog.log(this.role, "P2P negotiate ->", mode);
+			crocLog.log(this.role, "P2P negotiate ->", mode, reason || "");
 		}
 		if (mode === "relay") {
 			this.sendSignaling({ type: "transport-mode", mode: "relay" });
