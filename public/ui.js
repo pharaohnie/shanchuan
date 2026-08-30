@@ -297,16 +297,24 @@ function onFilesSelected(fileList) {
 	setSendModeUI("file");
 }
 
-function flashCopied(btn) {
+function flashCopied(btn, text = "已复制") {
 	const prev = btn.innerHTML;
-	btn.innerHTML = `${svgIcon("check")}<span>已复制</span>`;
+	btn.innerHTML = `${svgIcon("check")}<span>${text}</span>`;
 	setTimeout(() => (btn.innerHTML = prev), 2000);
 }
 
-function copyCode() {
+async function copyCode() {
 	const code = $("send-code").textContent;
-	navigator.clipboard.writeText(code).then(() => {
+	// 拼接完整分享链接：public_url（config.yaml 下发，回退页面 origin）+ #code=口令码
+	// getPublicURL 已在页面加载时预热，此处 await 立即返回缓存值，
+	// 避免等待 fetch 耗尽用户手势窗口导致 clipboard 写入被拒
+	const base = await croc.getPublicURL();
+	navigator.clipboard.writeText(`${base}/#code=${encodeURIComponent(code)}`).then(() => {
 		flashCopied($("btn-copy-code"));
+	}).catch((err) => {
+		// 写入失败时剪贴板会保留旧内容，必须显式提示，否则用户误以为复制成功
+		console.error("复制链接失败:", err);
+		flashCopied($("btn-copy-code"), "复制失败");
 	});
 }
 
@@ -347,6 +355,22 @@ document.addEventListener("DOMContentLoaded", () => {
 	$("receive-code-input").addEventListener("keydown", (e) => {
 		if (e.key === "Enter") croc.startReceive($("receive-code-input").value);
 	});
+
+	// 分享链接自动填充：链接形如 {public_url}/#code=XXXX（见 copyCode / config.yaml client.public_url）。
+	// 有 code 参数时自动切到接收视图、填入口令并聚焦；不自动开始接收，由用户确认。
+	const sharedCode = new URLSearchParams(window.location.hash.slice(1)).get("code");
+	if (sharedCode) {
+		switchView("receive");
+		const codeInput = $("receive-code-input");
+		codeInput.value = sharedCode;
+		codeInput.focus();
+		// 清除 hash：避免刷新重复填充，口令也不留在地址栏/浏览记录
+		history.replaceState(null, "", window.location.pathname + window.location.search);
+	}
+
+	// 预热分享域名缓存：用户点击“复制链接”时 getPublicURL 立即返回缓存值，
+	// 不再等待网络请求，保住浏览器用户手势窗口内的剪贴板写入权限
+	croc.getPublicURL();
 
 	// WASM loads in the worker (started at module load). Show UI immediately;
 	// the first wasmCall awaits worker readiness if needed.

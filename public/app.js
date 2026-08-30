@@ -142,6 +142,31 @@ async function getRelayURL() {
 	return relayUrlPromise;
 }
 
+// 分享链接的域名前缀：优先取 config.yaml 的 client.public_url（经 /api/config 下发），
+// 留空/加载失败时回退当前页面 origin。去掉尾部斜杠避免拼接双斜杠。
+let publicUrlPromise = null;
+
+async function getPublicURL() {
+	if (!publicUrlPromise) {
+		publicUrlPromise = (async () => {
+			try {
+				const resp = await fetch("/api/config");
+				if (resp.ok) {
+					const data = await resp.json();
+					const pub = data.public_url;
+					if (pub && typeof pub === "string" && pub.trim()) {
+						return pub.trim().replace(/\/+$/, "");
+					}
+				}
+			} catch (err) {
+				crocLog.warn("config", "Failed to load relay config, using page origin:", err);
+			}
+			return window.location.origin;
+		})();
+	}
+	return publicUrlPromise;
+}
+
 // ─── Worker Bridge ────────────────────────────────────────────────────────
 // The Go WASM module runs in a dedicated Worker; calls return Promises and
 // Uint8Array payloads are transferred zero-copy.
@@ -1098,6 +1123,7 @@ window.croc = {
 	startSend,
 	startReceive,
 	startStunPrecheck,
+	getPublicURL,
 	MAX_TEXT_BYTES,
 	get state() {
 		return publicState();

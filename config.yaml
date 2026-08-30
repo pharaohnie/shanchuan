@@ -42,6 +42,10 @@ client:
   #   http  → ws://{host}/ws
   #   https → wss://{host}/ws
   relay_url: ""
+  # 对外分享链接的域名前缀（含协议，结尾不带斜杠）
+  # 用途：发送端“复制链接”按钮生成的完整分享链接以此为前缀，如 http://sc.bjedu.pro/#code=XXXX
+  # 留空时，前端回退用当前页面 origin（location.origin）拼接
+  public_url: "https://sc.bjedu.pro"
 
 rate_limit:
   # 每个 IP 每分钟允许的中继房间 join 次数（防暴力枚举口令）

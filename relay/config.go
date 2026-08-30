@@ -35,7 +35,8 @@ type WebSocketConfig struct {
 }
 
 type ClientConfig struct {
-	RelayURL string `yaml:"relay_url"`
+	RelayURL  string `yaml:"relay_url"`
+	PublicURL string `yaml:"public_url"`
 }
 
 type RateLimitConfig struct {
@@ -51,7 +52,8 @@ type SecurityConfig struct {
 
 // ClientAPIResponse is returned by GET /api/config (public fields only).
 type ClientAPIResponse struct {
-	RelayURL string `json:"relay_url"`
+	RelayURL  string `json:"relay_url"`
+	PublicURL string `json:"public_url"`
 }
 
 var trustedProxyNets []*net.IPNet
@@ -69,7 +71,7 @@ func defaultConfig() Config {
 		WebSocket: WebSocketConfig{
 			AllowedOrigins: []string{"http://localhost:8154"},
 		},
-		Client: ClientConfig{RelayURL: ""},
+		Client: ClientConfig{RelayURL: "", PublicURL: ""},
 		RateLimit: RateLimitConfig{
 			JoinPerMinute:      30,
 			StunCheckPerMinute: 10,

@@ -87,7 +87,8 @@ func handleConfigAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ClientAPIResponse{
-		RelayURL: cfg.Client.RelayURL,
+		RelayURL:  cfg.Client.RelayURL,
+		PublicURL: cfg.Client.PublicURL,
 	})
 }
 
@@ -464,6 +465,15 @@ func securityMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// noCacheStatic 让浏览器每次对静态资源协商验证而非启发式强缓存。
+// 无 Cache-Control 时浏览器会按 Last-Modified 启发式缓存 HTML/JS，前端更新后旧文件仍命中缓存不拉新。
+func noCacheStatic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	configPath := flag.String("config", "", "path to config.yaml (default: auto-detect)")
 	flag.Parse()
@@ -488,7 +498,7 @@ func main() {
 	mux.HandleFunc("/ws", handleWebSocket)
 	mux.HandleFunc("/api/config", handleConfigAPI)
 	mux.HandleFunc("/api/stun-check", stunLimit.middleware(handleStunCheck))
-	mux.Handle("/", http.FileServer(http.Dir("../public")))
+	mux.Handle("/", noCacheStatic(http.FileServer(http.Dir("../public"))))
 
 	addr := cfg.Server.Addr
 	log.Printf("🐊 Croc-WASM Relay Server starting on %s", addr)
