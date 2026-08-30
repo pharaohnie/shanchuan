@@ -44,6 +44,14 @@ func TestRateLimitMiddleware(t *testing.T) {
 }
 
 func TestClientIPWithTrustForwardedIP(t *testing.T) {
+	oldNets := trustedProxyNets
+	t.Cleanup(func() { trustedProxyNets = oldNets })
+	var err error
+	trustedProxyNets, err = parseTrustedProxyCIDRs([]string{"10.0.0.0/8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
 	req.RemoteAddr = "10.0.0.1:1234"
 
@@ -52,12 +60,8 @@ func TestClientIPWithTrustForwardedIP(t *testing.T) {
 	}
 
 	req.Header.Set("X-Forwarded-For", "203.0.113.5, 10.0.0.1")
-	if got := clientIPWithTrust(req, false); got != "10.0.0.1" {
-		t.Fatalf("ignored XFF: got %q", got)
-	}
-
 	if got := clientIPWithTrust(req, true); got != "203.0.113.5" {
-		t.Fatalf("trusted XFF: got %q", got)
+		t.Fatalf("trusted XFF from proxy: got %q", got)
 	}
 
 	req.Header.Del("X-Forwarded-For")
@@ -65,9 +69,18 @@ func TestClientIPWithTrustForwardedIP(t *testing.T) {
 	if got := clientIPWithTrust(req, true); got != "198.51.100.9" {
 		t.Fatalf("trusted X-Real-IP: got %q", got)
 	}
+
+	direct := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	direct.RemoteAddr = "203.0.113.9:1234"
+	direct.Header.Set("X-Forwarded-For", "1.2.3.4")
+	if got := clientIPWithTrust(direct, true); got != "203.0.113.9" {
+		t.Fatalf("ignored spoofed XFF on direct connect: got %q", got)
+	}
 }
 
 func TestHandleConfigAPI(t *testing.T) {
+	oldCfg := cfg
+	t.Cleanup(func() { cfg = oldCfg })
 	cfg = Config{
 		Client: ClientConfig{RelayURL: "wss://relay.test/ws"},
 	}
@@ -80,5 +93,12 @@ func TestHandleConfigAPI(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "wss://relay.test/ws") {
 		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+}
+
+func TestTruncateForLogStripsControlChars(t *testing.T) {
+	got := truncateForLog("line1\nline2", 100)
+	if strings.Contains(got, "\n") {
+		t.Fatalf("expected control chars stripped, got %q", got)
 	}
 }

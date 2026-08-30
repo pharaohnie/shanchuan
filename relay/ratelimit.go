@@ -36,7 +36,7 @@ func clientIP(r *http.Request) string {
 }
 
 func clientIPWithTrust(r *http.Request, trustForwardedIP bool) string {
-	if trustForwardedIP {
+	if trustForwardedIP && isTrustedProxy(r.RemoteAddr) {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
 			if ip := strings.TrimSpace(parts[0]); ip != "" {
@@ -80,5 +80,19 @@ func (rl *ipRateLimiter) middleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		next(w, r)
+	}
+}
+
+func (rl *ipRateLimiter) cleanupLoop(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	for range ticker.C {
+		now := time.Now()
+		rl.mu.Lock()
+		for key, c := range rl.counters {
+			if now.After(c.resetAt) {
+				delete(rl.counters, key)
+			}
+		}
+		rl.mu.Unlock()
 	}
 }

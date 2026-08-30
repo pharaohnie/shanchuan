@@ -5,6 +5,10 @@ server:
   # HTTP/WebSocket 监听地址
   # 示例: ":8154"（全部网卡）或 "127.0.0.1:8154"（仅本机）
   addr: ":8154"
+  # 同时存在的最大房间数
+  max_rooms: 1000
+  # 房间无活动超过该分钟数后清理
+  room_inactivity_minutes: 30
 
 cors:
   # 浏览器跨域请求（fetch、XHR）允许的 Origin 列表
@@ -34,10 +38,15 @@ rate_limit:
   join_per_minute: 30
   # 每个 IP 每分钟允许的 STUN 检测上报次数
   stun_check_per_minute: 10
-  # 部署在反向代理后时设为 true，从 X-Forwarded-For / X-Real-IP 读取客户端 IP
-  trust_forwarded_ip: true
+  # 为 true 且请求来自 trusted_proxy_cidrs 时，才从 X-Forwarded-For / X-Real-IP 读取客户端 IP
+  trust_forwarded_ip: false
+  trusted_proxy_cidrs:
+    - "127.0.0.1/32"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
 
 security:
   # Content-Security-Policy 响应头（留空则不发送）
-  # 默认允许同源脚本、jsDelivr CDN、WebSocket/STUN 连接
-  content_security_policy: "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'wasm-unsafe-eval'; connect-src 'self' ws: wss: stun:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; worker-src 'self'"
+  # connect-src: WebSocket 走同源 'self' 即可；WebRTC/STUN 不受 CSP connect-src 约束，勿写 stun: URL
+  content_security_policy: "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; worker-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'"

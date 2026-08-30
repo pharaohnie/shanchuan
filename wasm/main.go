@@ -23,9 +23,10 @@ var currentPake *pake.Pake
 // rebuilding the cipher (key schedule + GCM init) for every 64KB chunk is pure
 // waste. We rebuild only when the key actually changes.
 var (
-	cachedKey    []byte
-	cachedAESGCM cipher.AEAD
-	nonceCounter uint64
+	cachedKey           []byte
+	cachedAESGCM        cipher.AEAD
+	encryptNonceCounter uint64
+	decryptNonceCounter uint64
 )
 
 // getCipher returns a cached AES-GCM cipher, rebuilding only when the key changes.
@@ -43,17 +44,16 @@ func getCipher(key []byte) (cipher.AEAD, error) {
 	}
 	cachedKey = append(cachedKey[:0], key...)
 	cachedAESGCM = gcm
-	nonceCounter = 0
+	encryptNonceCounter = 0
+	decryptNonceCounter = 0
 	return gcm, nil
 }
 
-// nextNonce returns a 96-bit GCM nonce from an incrementing counter. GCM only
-// requires nonces be unique per key; a counter is far cheaper than crypto/rand
-// per chunk and doubles as an implicit chunk ordering.
-func nextNonce(size int) []byte {
+// nextNonce returns a 96-bit GCM nonce from an incrementing counter per direction.
+func nextNonce(size int, counter *uint64) []byte {
 	nonce := make([]byte, size)
-	binary.BigEndian.PutUint64(nonce[:8], nonceCounter)
-	nonceCounter++
+	binary.BigEndian.PutUint64(nonce[:8], *counter)
+	*counter++
 	return nonce
 }
 
@@ -209,7 +209,7 @@ func encrypt(this js.Value, args []js.Value) interface{} {
 		return returnError("encrypt: cipher init failed: " + err.Error())
 	}
 
-	nonce := nextNonce(aesgcm.NonceSize())
+	nonce := nextNonce(aesgcm.NonceSize(), &encryptNonceCounter)
 	ciphertext := aesgcm.Seal(nil, nonce, data, aad)
 	// Prepend nonce to ciphertext
 	result := append(nonce, ciphertext...)
@@ -275,9 +275,6 @@ func main() {
 	js.Global().Set("wasmGetSessionKey", js.FuncOf(getSessionKey))
 	js.Global().Set("wasmEncrypt", js.FuncOf(encrypt))
 	js.Global().Set("wasmDecrypt", js.FuncOf(decrypt))
-
-	// Signal that the WASM module is ready
-	js.Global().Get("console").Call("log", "🐊 Croc-WASM module loaded and ready")
 
 	// Block forever to keep the WASM module alive
 	select {}

@@ -14,6 +14,7 @@ import (
 func initTestRelay() {
 	cfg = defaultConfig()
 	cfg.WebSocket.AllowedOrigins = []string{"*"}
+	cfg.Server.MaxRooms = 1000
 	initUpgrader()
 	joinLimit = newIPRateLimiter(100, time.Minute, false)
 	stunLimit = newIPRateLimiter(100, time.Minute, false)
@@ -25,11 +26,13 @@ func TestMain(m *testing.M) {
 }
 
 func TestRoomExpireUnblocksWaiter(t *testing.T) {
+	now := time.Now()
 	room := &Room{
-		name:      "test",
-		createdAt: time.Now(),
-		ready:     make(chan struct{}),
-		done:      make(chan struct{}),
+		name:         "test",
+		createdAt:    now,
+		lastActivity: now,
+		ready:        make(chan struct{}),
+		done:         make(chan struct{}),
 	}
 
 	unblocked := make(chan struct{})
@@ -61,6 +64,17 @@ func TestRoomExpireSafeWhenReadyAlreadyClosed(t *testing.T) {
 
 	// Must not panic when ready is already closed.
 	room.expire("Room expired due to inactivity")
+}
+
+func TestRoomCloseDoneIdempotent(t *testing.T) {
+	room := &Room{done: make(chan struct{})}
+	room.closeDone()
+	room.closeDone()
+	select {
+	case <-room.done:
+	default:
+		t.Fatal("done should be closed")
+	}
 }
 
 func TestHandleStunCheck(t *testing.T) {
@@ -136,14 +150,48 @@ func TestHandleWebSocketFirstClientExpires(t *testing.T) {
 		t.Fatalf("expected waiting message, got %q", msg)
 	}
 
-	room := relay.getOrCreateRoom("expire-test")
+	room, err := relay.getOrCreateRoom("expire-test")
+	if err != nil {
+		t.Fatalf("getOrCreateRoom: %v", err)
+	}
 	room.expire("Room expired due to inactivity")
 
-	_, msg, err = conn.ReadMessage()
-	if err != nil {
-		t.Fatalf("read error after expire: %v", err)
+	_, _, err = conn.ReadMessage()
+	if err == nil {
+		t.Fatal("expected connection closed after expire")
 	}
-	if !strings.Contains(string(msg), `"error"`) {
-		t.Fatalf("expected error message after expire, got %q", msg)
+}
+
+func TestMaxRoomsRejectsJoin(t *testing.T) {
+	relay.rooms = make(map[string]*Room)
+	cfg.Server.MaxRooms = 1
+
+	now := time.Now()
+	relay.rooms["occupied"] = &Room{
+		name:         "occupied",
+		createdAt:    now,
+		lastActivity: now,
+		ready:        make(chan struct{}),
+		done:         make(chan struct{}),
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(handleWebSocket))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	dialer := websocket.Dialer{}
+	conn, _, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"join","room":"new-room"}`))
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(msg), "Server busy") {
+		t.Fatalf("expected busy error, got %q", msg)
 	}
 }

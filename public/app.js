@@ -94,7 +94,8 @@ const state = {
 	role: null, // 'sender' | 'receiver'
 	code: null, // room code / PAKE secret
 	ws: null, // WebSocket connection
-	transferId: null, // UUID for this transfer
+	transferIdBytes: null, // 16-byte transfer binding for AAD
+	savedFilenames: null, // Set of names written in batch (receiver)
 	files: [], // selected files (sender)
 	receivedMetadata: null, // file metadata from sender
 	merged: null, // pre-allocated Uint8Array for received file (written in-place)
@@ -133,7 +134,7 @@ async function getRelayURL() {
 					return crocSecurity.deriveRelayURL(data.relay_url);
 				}
 			} catch (err) {
-				console.warn("Failed to load relay config, using default:", err);
+				crocLog.warn("config", "Failed to load relay config, using default:", err);
 			}
 			return crocSecurity.deriveRelayURL("");
 		})();
@@ -221,17 +222,24 @@ function isSignalingMessage(msg) {
 }
 
 async function reportStunCheck(result) {
-	try {
-		const resp = await fetch("/api/stun-check", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify(result),
-		});
-		if (!resp.ok) {
-			console.warn("STUN report failed: HTTP", resp.status);
+	for (let attempt = 0; attempt < 2; attempt++) {
+		try {
+			const resp = await fetch("/api/stun-check", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(result),
+			});
+			if (resp.ok) {
+				crocLog.log("stun", "report ok", result.ok ? "srflx" : result.error);
+				return result;
+			}
+			crocLog.warn("stun", "report HTTP", resp.status, "attempt", attempt + 1);
+		} catch (err) {
+			crocLog.warn("stun", "report failed:", err.message, "attempt", attempt + 1);
 		}
-	} catch (err) {
-		console.warn("STUN report failed:", err);
+		if (attempt === 0) {
+			await new Promise((r) => setTimeout(r, 500));
+		}
 	}
 	return result;
 }
@@ -248,7 +256,7 @@ function startStunPrecheck() {
 			})
 			.catch((err) => {
 				state.stunReachable = false;
-				console.warn("STUN precheck failed:", err);
+				crocLog.warn("stun", "precheck failed:", err.message);
 				return {
 					ok: false,
 					server: STUN_SERVER,
@@ -289,12 +297,21 @@ function resetForNextFile() {
 	state.bytesWritten = 0;
 }
 
-function bindReceiverTransport(ws, transport, enqueue, resolveOnce) {
+function bindReceiverTransport(ws, transport, enqueue, resolveOnce, flushPendingRelay) {
 	state.transport = transport;
+	crocLog.log(state.role, "transport bound", transport.mode);
+	if (flushPendingRelay) flushPendingRelay(transport);
 	transport.onMessage((data) => {
+		crocLog.log("recv", `chunk ${data.byteLength}B via ${transport.mode}`);
 		enqueue(async () => {
-			await handleReceivedData(data);
+			try {
+				await handleReceivedData(data);
+			} catch (err) {
+				crocLog.error("recv", "handleReceivedData failed:", err.message);
+				throw err;
+			}
 			if (isBatchComplete()) {
+				crocLog.log("recv", "batch complete");
 				resolveOnce();
 				if (transport.mode === "relay") {
 					ws.send(
@@ -316,8 +333,9 @@ async function setupRelayOnlyTransport(ws, tab, role) {
 	return transport;
 }
 
-async function setupReceiverTransport(ws, negotiator, enqueue, resolveOnce) {
+async function setupReceiverTransport(ws, negotiator, enqueue, resolveOnce, flushPendingRelay) {
 	const reachable = await waitForStunPrecheck();
+	crocLog.log("recv", "STUN reachable:", reachable);
 	if (!reachable) {
 		if (negotiator) negotiator.destroy();
 		const transport = await setupRelayOnlyTransport(
@@ -325,16 +343,17 @@ async function setupReceiverTransport(ws, negotiator, enqueue, resolveOnce) {
 			"receive",
 			"receiver",
 		);
-		bindReceiverTransport(ws, transport, enqueue, resolveOnce);
+		bindReceiverTransport(ws, transport, enqueue, resolveOnce, flushPendingRelay);
 		return;
 	}
 
 	const { mode, p2pTransport } = await negotiator.waitReady();
+	crocLog.log("recv", "negotiation result:", mode);
 	const transport =
 		mode === "p2p" ? p2pTransport : new RelayTransport(ws);
 	state.transport = transport;
 	updateTransportModeUI("receive", mode);
-	bindReceiverTransport(ws, transport, enqueue, resolveOnce);
+	bindReceiverTransport(ws, transport, enqueue, resolveOnce, flushPendingRelay);
 }
 
 async function setupSenderTransport(ws, assignNegotiator, flushPendingSignaling) {
@@ -445,10 +464,23 @@ async function startReceive(code) {
 // ─── Core Transfer Logic ──────────────────────────────────────────────────
 async function connectAndTransfer() {
 	const relayURL = await getRelayURL();
+	crocLog.log(state.role, "connecting", relayURL);
+	if (crocSecurity.isInsecureRelayURL(relayURL)) {
+		throw new Error("当前页面未使用 HTTPS/WSS，无法在公网安全传输");
+	}
 	return new Promise((resolve, reject) => {
 		const ws = new WebSocket(relayURL);
 		ws.binaryType = "arraybuffer"; // receive binary as ArrayBuffer (no FileReader)
 		state.ws = ws;
+		const pendingRelayBinary = [];
+
+		const flushPendingRelay = (transport) => {
+			if (transport.mode !== "relay" || pendingRelayBinary.length === 0) return;
+			crocLog.log("recv", `flushing ${pendingRelayBinary.length} buffered relay frame(s)`);
+			for (const data of pendingRelayBinary.splice(0)) {
+				transport.dispatch(data);
+			}
+		};
 
 		let pakeState = "init"; // init -> waiting -> paired -> pake -> complete
 		let negotiator = null;
@@ -494,24 +526,48 @@ async function connectAndTransfer() {
 		};
 
 		ws.onopen = () => {
-			ws.send(JSON.stringify({ type: "join", room: state.code }));
+			crocLog.log(state.role, "websocket open");
+			crocSecurity
+				.deriveRoomId(state.code)
+				.then((roomId) => {
+					crocLog.log(state.role, "join room", `${roomId.slice(0, 8)}…`);
+					ws.send(JSON.stringify({ type: "join", room: roomId }));
+				})
+				.catch((err) => rejectOnce(err));
 		};
 
 		ws.onmessage = (event) => {
 			try {
 				if (typeof event.data === "string") {
 					const msg = JSON.parse(event.data);
+					crocLog.log(state.role, "ws text", msg.type, msg.role || msg.mode || "");
 					if (msg.type === "waiting") {
 						pakeState = "waiting";
 						if (state.role === "sender") {
-							ui.setStatus("send", "等待接收方输入口令码…", "wait");
+							ui.setStatus(
+								"send",
+								"等待接收方输入口令码并点击「接收」…",
+								"wait",
+							);
+						} else {
+							crocLog.log(
+								"recv",
+								"在房间中等待发送方（请先让对方点击「开始发送」）",
+							);
+							ui.setStatus(
+								"receive",
+								"已连接，等待发送方开始传输…",
+								"wait",
+							);
 						}
 					} else if (msg.type === "paired") {
 						pakeState = "paired";
+						crocLog.log(state.role, "paired, relay role:", msg.role);
 						enqueue(() => runPAKEInit());
 					} else if (isSignalingMessage(msg)) {
 						handleSignaling(msg);
 					} else if (msg.type === "error") {
+						crocLog.error(state.role, "relay error:", msg.msg);
 						rejectOnce(new Error(msg.msg || "Relay error"));
 					} else if (msg.type === crocTransferPolicy.TRANSFER_ACK) {
 						if (state.role === "sender") {
@@ -523,12 +579,28 @@ async function connectAndTransfer() {
 				if (event.data instanceof ArrayBuffer) {
 					const data = new Uint8Array(event.data);
 					if (pakeState === "pake") {
+						crocLog.log(state.role, "pake binary", data.byteLength, "B");
 						enqueue(() => handleBinary(data));
-					} else if (
-						pakeState === "complete" &&
-						state.transport?.mode === "relay"
-					) {
-						state.transport.dispatch(data);
+					} else if (pakeState === "complete") {
+						if (state.transport?.mode === "relay") {
+							state.transport.dispatch(data);
+						} else if (!state.transport) {
+							pendingRelayBinary.push(data);
+							crocLog.warn(
+								"recv",
+								`buffered ${data.byteLength}B before transport ready (queue=${pendingRelayBinary.length})`,
+							);
+						} else {
+							crocLog.warn(
+								"recv",
+								`ignored ${data.byteLength}B on ws in ${state.transport.mode} mode`,
+							);
+						}
+					} else {
+						crocLog.warn(
+							state.role,
+							`dropped ${data.byteLength}B binary in pakeState=${pakeState}`,
+						);
 					}
 					return;
 				}
@@ -537,9 +609,13 @@ async function connectAndTransfer() {
 			}
 		};
 
-		ws.onerror = () => rejectOnce(new Error("WebSocket error"));
+		ws.onerror = () => {
+			crocLog.error(state.role, "websocket error");
+			rejectOnce(new Error("WebSocket error"));
+		};
 
 		ws.onclose = async (event) => {
+			crocLog.log(state.role, "websocket close", event.code, event.reason || "");
 			try {
 				await chain;
 			} catch {
@@ -583,6 +659,14 @@ async function connectAndTransfer() {
 					const keyResult = await wasmCall("wasmGetSessionKey");
 					state.sessionKey = keyResult.key;
 					state.sessionKeyBytes = base64ToUint8Array(keyResult.key);
+					state.transferIdBytes = await crocSecurity.deriveTransferId(
+						state.sessionKeyBytes,
+					);
+					crocLog.log(
+						state.role,
+						"PAKE complete, transferId",
+						crocLog.hexPreview(state.transferIdBytes),
+					);
 
 					if (state.role === "sender") {
 						ui.setStatus("send", "密钥已建立，协商 P2P 连接…", "key");
@@ -624,6 +708,7 @@ async function connectAndTransfer() {
 						state.batchTotalChunks = 0;
 						state.batchDoneChunks = 0;
 						state.isTextPayload = false;
+						state.savedFilenames = new Set();
 						ui.resetReceiveView();
 						if (!negotiator) {
 							negotiator = new P2pNegotiator(ws, "receiver");
@@ -635,6 +720,7 @@ async function connectAndTransfer() {
 							negotiator,
 							enqueue,
 							resolveOnce,
+							flushPendingRelay,
 						);
 					}
 				}
@@ -692,7 +778,17 @@ async function sendOneFile(transport, file, fileIndex, fileCount, batchTotalChun
 			...(state.textSend ? { kind: "text" } : {}),
 		}),
 	);
-	const metadataEnc = await wasmCall("wasmEncrypt", keyBytes, null, metadataBytes);
+	const metadataAAD = crocSecurity.encodeAAD(
+		state.transferIdBytes,
+		crocSecurity.METADATA_FILE_INDEX,
+		crocSecurity.METADATA_AAD_SEQ,
+	);
+	const metadataEnc = await wasmCall(
+		"wasmEncrypt",
+		keyBytes,
+		metadataAAD,
+		metadataBytes,
+	);
 	transport.send(metadataEnc);
 
 	const updateSendProgress = (chunkInFile) => {
@@ -722,19 +818,17 @@ async function sendOneFile(transport, file, fileIndex, fileCount, batchTotalChun
 		return;
 	}
 
-	const fileReader = new FileReader();
-
-	const readChunk = (i) =>
-		new Promise((resolve) => {
-			const start = i * chunkSize;
-			const end = Math.min(start + chunkSize, file.size);
-			fileReader.onload = () => resolve(new Uint8Array(fileReader.result));
-			fileReader.readAsArrayBuffer(file.slice(start, end));
-		});
+	const readChunk = async (i) => {
+		const start = i * chunkSize;
+		const end = Math.min(start + chunkSize, file.size);
+		const buf = await file.slice(start, end).arrayBuffer();
+		return new Uint8Array(buf);
+	};
 
 	const encryptChunk = async (i) => {
 		const chunkData = await readChunk(i);
-		return wasmCall("wasmEncrypt", keyBytes, encodeSeq(i), chunkData);
+		const aad = crocSecurity.encodeAAD(state.transferIdBytes, fileIndex, i);
+		return wasmCall("wasmEncrypt", keyBytes, aad, chunkData);
 	};
 
 	const drain = () => transport.drain(BACKPRESSURE_THRESHOLD);
@@ -756,6 +850,12 @@ async function sendOneFile(transport, file, fileIndex, fileCount, batchTotalChun
 // ─── Receiver: File Reception ──────────────────────────────────────────────
 async function finishCurrentFile() {
 	const metadata = state.receivedMetadata;
+	const written = state.streaming ? state.bytesWritten : state.mergeOffset;
+	if (written !== metadata.size) {
+		throw new Error(
+			`Incomplete file: received ${written} of ${metadata.size} bytes`,
+		);
+	}
 	if (metadata.kind === "text") {
 		const text = new TextDecoder().decode(state.merged);
 		ui.showReceivedText(text);
@@ -799,10 +899,33 @@ async function finishCurrentFile() {
 }
 
 async function handleReceivedData(data) {
-	// 3.2: AAD binds each chunk's position. Metadata uses no AAD; data chunk k
-	// uses seq=k, so reordering/replay fails GCM authentication on decrypt.
-	const aad = state._metadataReceived ? encodeSeq(state.currentChunk) : null;
-	const decrypted = await wasmCall("wasmDecrypt", state.sessionKeyBytes, aad, data);
+	if (!state.transferIdBytes || !state.sessionKeyBytes) {
+		crocLog.error("recv", "missing session key or transferId before decrypt");
+		throw new Error("Session not ready for decrypt");
+	}
+	const fileIndex = state._metadataReceived ? state.fileIndex : 0;
+	const seq = state._metadataReceived
+		? state.currentChunk
+		: crocSecurity.METADATA_AAD_SEQ;
+	const aadFileIndex = state._metadataReceived
+		? fileIndex
+		: crocSecurity.METADATA_FILE_INDEX;
+	const aad = crocSecurity.encodeAAD(state.transferIdBytes, aadFileIndex, seq);
+	crocLog.log(
+		"recv",
+		`decrypt ${data.byteLength}B meta=${!state._metadataReceived} file=${fileIndex} seq=${seq}`,
+	);
+	let decrypted;
+	try {
+		decrypted = await wasmCall("wasmDecrypt", state.sessionKeyBytes, aad, data);
+	} catch (err) {
+		crocLog.error(
+			"recv",
+			`decrypt failed meta=${!state._metadataReceived} file=${fileIndex} seq=${seq}:`,
+			err.message,
+		);
+		throw err;
+	}
 
 	if (!state._metadataReceived) {
 		state._metadataReceived = true;
@@ -814,6 +937,10 @@ async function handleReceivedData(data) {
 			throw new Error(`Invalid metadata: ${err.message}`);
 		}
 		metadata = crocSecurity.validateMetadata(metadata);
+		crocLog.log(
+			"recv",
+			`metadata name=${metadata.name} size=${metadata.size} chunks=${metadata.chunks} idx=${metadata.fileIndex}/${metadata.fileCount}`,
+		);
 		const fileIndex = metadata.fileIndex;
 		const fileCount = metadata.fileCount;
 		state.receivedMetadata = metadata;
@@ -840,12 +967,15 @@ async function handleReceivedData(data) {
 			}
 		}
 
-		if (state.saveDir) {
+		if (state.saveDir && !isText) {
 			try {
-				state.fileHandle = await state.saveDir.getFileHandle(
+				const saveName = crocSecurity.dedupeFilename(
 					metadata.name,
-					{ create: true },
+					state.savedFilenames,
 				);
+				state.fileHandle = await state.saveDir.getFileHandle(saveName, {
+					create: true,
+				});
 				state.writable = await state.fileHandle.createWritable();
 				state.streaming = true;
 			} catch (err) {
@@ -928,14 +1058,6 @@ function base64ToUint8Array(b64) {
 		bytes[i] = binary.charCodeAt(i);
 	}
 	return bytes;
-}
-
-// Encode a chunk sequence number as 8-byte big-endian for AES-GCM AAD.
-// Binds each chunk's position so reordering/replay is detected on decrypt.
-function encodeSeq(n) {
-	const aad = new Uint8Array(8);
-	new DataView(aad.buffer).setBigUint64(0, BigInt(n), false);
-	return aad;
 }
 
 // ─── UI-facing API ────────────────────────────────────────────────────────

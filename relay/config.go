@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -20,7 +21,9 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Addr string `yaml:"addr"`
+	Addr                 string `yaml:"addr"`
+	MaxRooms             int    `yaml:"max_rooms"`
+	RoomInactivityMins   int    `yaml:"room_inactivity_minutes"`
 }
 
 type CORSConfig struct {
@@ -36,9 +39,10 @@ type ClientConfig struct {
 }
 
 type RateLimitConfig struct {
-	JoinPerMinute      int  `yaml:"join_per_minute"`
-	StunCheckPerMinute int  `yaml:"stun_check_per_minute"`
-	TrustForwardedIP   bool `yaml:"trust_forwarded_ip"`
+	JoinPerMinute      int      `yaml:"join_per_minute"`
+	StunCheckPerMinute int      `yaml:"stun_check_per_minute"`
+	TrustForwardedIP   bool     `yaml:"trust_forwarded_ip"`
+	TrustedProxyCIDRs  []string `yaml:"trusted_proxy_cidrs"`
 }
 
 type SecurityConfig struct {
@@ -50,9 +54,15 @@ type ClientAPIResponse struct {
 	RelayURL string `json:"relay_url"`
 }
 
+var trustedProxyNets []*net.IPNet
+
 func defaultConfig() Config {
 	return Config{
-		Server: ServerConfig{Addr: ":8154"},
+		Server: ServerConfig{
+			Addr:               ":8154",
+			MaxRooms:           1000,
+			RoomInactivityMins: 30,
+		},
 		CORS: CORSConfig{
 			AllowedOrigins: []string{"http://localhost:8154"},
 		},
@@ -79,6 +89,12 @@ func loadConfig(path string) (Config, error) {
 	if cfg.Server.Addr == "" {
 		cfg.Server.Addr = ":8154"
 	}
+	if cfg.Server.MaxRooms <= 0 {
+		cfg.Server.MaxRooms = 1000
+	}
+	if cfg.Server.RoomInactivityMins <= 0 {
+		cfg.Server.RoomInactivityMins = 30
+	}
 	if len(cfg.CORS.AllowedOrigins) == 0 {
 		cfg.CORS.AllowedOrigins = []string{"http://localhost:8154"}
 	}
@@ -91,7 +107,46 @@ func loadConfig(path string) (Config, error) {
 	if cfg.RateLimit.StunCheckPerMinute <= 0 {
 		cfg.RateLimit.StunCheckPerMinute = 10
 	}
+	trustedProxyNets, err = parseTrustedProxyCIDRs(cfg.RateLimit.TrustedProxyCIDRs)
+	if err != nil {
+		return cfg, fmt.Errorf("parse trusted_proxy_cidrs: %w", err)
+	}
 	return cfg, nil
+}
+
+func parseTrustedProxyCIDRs(cidrs []string) ([]*net.IPNet, error) {
+	if len(cidrs) == 0 {
+		return nil, nil
+	}
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		_, n, err := net.ParseCIDR(strings.TrimSpace(cidr))
+		if err != nil {
+			return nil, fmt.Errorf("invalid CIDR %q: %w", cidr, err)
+		}
+		nets = append(nets, n)
+	}
+	return nets, nil
+}
+
+func isTrustedProxy(remoteAddr string) bool {
+	if len(trustedProxyNets) == 0 {
+		return false
+	}
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, n := range trustedProxyNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func (cfg Config) originAllowed(allowed []string, origin string) bool {
@@ -144,6 +199,12 @@ func resolveConfigPath(flagPath string) string {
 
 func truncateForLog(s string, max int) string {
 	s = strings.TrimSpace(s)
+	s = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return '?'
+		}
+		return r
+	}, s)
 	if len(s) <= max {
 		return s
 	}

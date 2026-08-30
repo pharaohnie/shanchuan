@@ -176,7 +176,7 @@ class P2pNegotiator {
 				return true;
 			}
 			case "transport-mode": {
-				if (this.role === "receiver" && msg.mode === "relay") {
+				if (msg.mode === "relay") {
 					this._resolve("relay", null);
 				}
 				return true;
@@ -190,6 +190,12 @@ class P2pNegotiator {
 		if (this._resolved) return;
 		this._resolved = true;
 		clearTimeout(this._timeout);
+		if (typeof crocLog !== "undefined") {
+			crocLog.log(this.role, "P2P negotiate ->", mode);
+		}
+		if (mode === "relay") {
+			this.sendSignaling({ type: "transport-mode", mode: "relay" });
+		}
 		if (this.pc && mode === "relay") {
 			this.pc.close();
 			this.pc = null;

@@ -4,10 +4,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,15 +27,21 @@ var (
 // maxWSMessageBytes caps a single WebSocket frame (256 KiB chunk + GCM overhead + headroom).
 const maxWSMessageBytes = 2 * 1024 * 1024
 
+const roomDoneWait = 35 * time.Minute
+
+var errTooManyRooms = errors.New("too many rooms")
+
 // Room manages two paired WebSocket connections
 type Room struct {
-	name      string
-	first     *websocket.Conn
-	second    *websocket.Conn
-	createdAt time.Time
-	ready     chan struct{} // closed when second client arrives
-	done      chan struct{} // closed when pipeConnections finishes
-	mu        sync.Mutex
+	name         string
+	first        *websocket.Conn
+	second       *websocket.Conn
+	createdAt    time.Time
+	lastActivity time.Time
+	ready        chan struct{} // closed when second client arrives
+	done         chan struct{} // closed when pipeConnections finishes
+	doneOnce     sync.Once
+	mu           sync.Mutex
 }
 
 // Relay manages all rooms
@@ -88,6 +97,8 @@ func handleStunCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+
 	var report StunReport
 	if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -105,6 +116,13 @@ func handleStunCheck(w http.ResponseWriter, r *http.Request) {
 	if len(report.CandidateTypes) > 32 {
 		http.Error(w, "too many candidate types", http.StatusBadRequest)
 		return
+	}
+	for i, typ := range report.CandidateTypes {
+		if len(typ) > 32 {
+			http.Error(w, "candidate type too long", http.StatusBadRequest)
+			return
+		}
+		report.CandidateTypes[i] = typ
 	}
 
 	remote := r.RemoteAddr
@@ -159,20 +177,48 @@ func logTransportMode(room string, msgType int, msg []byte) {
 	}
 }
 
-func (r *Relay) getOrCreateRoom(name string) *Room {
+func (room *Room) touchActivity() {
+	room.mu.Lock()
+	room.lastActivity = time.Now()
+	room.mu.Unlock()
+}
+
+func (room *Room) touchActivityLocked() {
+	room.lastActivity = time.Now()
+}
+
+func (room *Room) closeReady() {
+	select {
+	case <-room.ready:
+	default:
+		close(room.ready)
+	}
+}
+
+func (room *Room) closeDone() {
+	room.doneOnce.Do(func() { close(room.done) })
+}
+
+func (r *Relay) getOrCreateRoom(name string) (*Room, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if room, ok := r.rooms[name]; ok {
-		return room
+		room.touchActivityLocked()
+		return room, nil
 	}
+	if len(r.rooms) >= cfg.Server.MaxRooms {
+		return nil, errTooManyRooms
+	}
+	now := time.Now()
 	room := &Room{
-		name:      name,
-		createdAt: time.Now(),
-		ready:     make(chan struct{}),
-		done:      make(chan struct{}),
+		name:         name,
+		createdAt:    now,
+		lastActivity: now,
+		ready:        make(chan struct{}),
+		done:         make(chan struct{}),
 	}
 	r.rooms[name] = room
-	return room
+	return room, nil
 }
 
 func (r *Relay) deleteRoom(name string) {
@@ -183,19 +229,14 @@ func (r *Relay) deleteRoom(name string) {
 }
 
 // expire closes connections and unblocks any waiter on room.ready.
+// Does not write to connections (avoids concurrent WriteMessage with pipeConnections).
 func (room *Room) expire(reason string) {
 	room.mu.Lock()
 	defer room.mu.Unlock()
 
-	select {
-	case <-room.ready:
-	default:
-		close(room.ready)
-	}
+	room.closeReady()
 
 	if room.first != nil {
-		errMsg, _ := json.Marshal(RelayMessage{Type: "error", Msg: reason})
-		room.first.WriteMessage(websocket.TextMessage, errMsg)
 		room.first.Close()
 		room.first = nil
 	}
@@ -203,15 +244,20 @@ func (room *Room) expire(reason string) {
 		room.second.Close()
 		room.second = nil
 	}
+	_ = reason
 }
 
 func (r *Relay) cleanupLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
+	inactivity := time.Duration(cfg.Server.RoomInactivityMins) * time.Minute
 	for range ticker.C {
 		var stale []*Room
 		r.mu.Lock()
 		for name, room := range r.rooms {
-			if time.Since(room.createdAt) > 30*time.Minute {
+			room.mu.Lock()
+			last := room.lastActivity
+			room.mu.Unlock()
+			if time.Since(last) > inactivity {
 				log.Printf("[relay] cleanup stale room '%s'", name)
 				delete(r.rooms, name)
 				stale = append(stale, room)
@@ -221,11 +267,26 @@ func (r *Relay) cleanupLoop() {
 
 		for _, room := range stale {
 			room.expire("Room expired due to inactivity")
+			room.closeDone()
 		}
 	}
 }
 
-func pipeConnections(room string, a, b *websocket.Conn) {
+func watchFirstClientDisconnect(conn *websocket.Conn, room *Room, ctx context.Context) {
+	// Use CloseHandler only — never ReadMessage here; pipeConnections owns the reader.
+	conn.SetCloseHandler(func(code int, text string) error {
+		if ctx.Err() != nil {
+			return nil
+		}
+		log.Printf("[relay] room '%s': first client disconnected (code=%d)", room.name, code)
+		room.expire("Peer disconnected")
+		room.closeDone()
+		return nil
+	})
+	<-ctx.Done()
+}
+
+func pipeConnections(room *Room, roomName string, a, b *websocket.Conn) {
 	a.SetReadLimit(maxWSMessageBytes)
 	b.SetReadLimit(maxWSMessageBytes)
 
@@ -238,10 +299,13 @@ func pipeConnections(room string, a, b *websocket.Conn) {
 		for {
 			msgType, msg, err := src.ReadMessage()
 			if err != nil {
+				log.Printf("[relay] room '%s': forward read ended: %v", roomName, err)
 				return
 			}
-			logTransportMode(room, msgType, msg)
+			room.touchActivity()
+			logTransportMode(roomName, msgType, msg)
 			if err := dst.WriteMessage(msgType, msg); err != nil {
+				log.Printf("[relay] room '%s': forward write failed: %v", roomName, err)
 				return
 			}
 		}
@@ -301,7 +365,16 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[relay] %s joining room '%s'", remoteAddr, joinMsg.Room)
 
-	room := relay.getOrCreateRoom(joinMsg.Room)
+	room, err := relay.getOrCreateRoom(joinMsg.Room)
+	if err != nil {
+		log.Printf("[relay] %s: room limit exceeded", remoteAddr)
+		fullMsg, _ := json.Marshal(RelayMessage{Type: "error", Msg: "Server busy, try again later"})
+		conn.WriteMessage(websocket.TextMessage, fullMsg)
+		conn.Close()
+		return
+	}
+	room.touchActivity()
+
 	room.mu.Lock()
 
 	if room.first == nil {
@@ -311,36 +384,46 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		pairMsg, _ := json.Marshal(RelayMessage{Type: "waiting", Role: "sender"})
 		conn.WriteMessage(websocket.TextMessage, pairMsg)
 
+		watchCtx, watchCancel := context.WithCancel(context.Background())
+		defer watchCancel()
+		go watchFirstClientDisconnect(conn, room, watchCtx)
+
 		<-room.ready
+		watchCancel()
 
 		room.mu.Lock()
 		first, second := room.first, room.second
 		room.mu.Unlock()
 
+		defer room.closeDone()
+
 		if first == nil || second == nil {
+			relay.deleteRoom(joinMsg.Room)
 			return
 		}
 
-		pipeConnections(joinMsg.Room, first, second)
-
-		close(room.done)
+		pipeConnections(room, joinMsg.Room, first, second)
 		relay.deleteRoom(joinMsg.Room)
 
 	} else if room.second == nil {
 		room.second = conn
-		room.mu.Unlock()
 
 		pairedFirst, _ := json.Marshal(RelayMessage{Type: "paired", Role: "sender"})
 		pairedSecond, _ := json.Marshal(RelayMessage{Type: "paired", Role: "receiver"})
 
-		room.mu.Lock()
-		room.first.WriteMessage(websocket.TextMessage, pairedFirst)
+		if room.first != nil {
+			room.first.WriteMessage(websocket.TextMessage, pairedFirst)
+		}
 		room.second.WriteMessage(websocket.TextMessage, pairedSecond)
+
+		room.closeReady()
 		room.mu.Unlock()
 
-		close(room.ready)
-
-		<-room.done
+		select {
+		case <-room.done:
+		case <-time.After(roomDoneWait):
+			log.Printf("[relay] room '%s': second client timed out waiting for transfer", joinMsg.Room)
+		}
 		relay.deleteRoom(joinMsg.Room)
 
 	} else {
@@ -353,8 +436,16 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 func securityMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		if csp := cfg.Security.ContentSecurityPolicy; csp != "" {
 			w.Header().Set("Content-Security-Policy", csp)
+		}
+		// Avoid stale CSP/HTML during local development after config changes.
+		if r.URL.Path == "/" || strings.HasSuffix(r.URL.Path, ".html") {
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		}
 		if origin := cfg.corsOrigin(r); origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
@@ -385,6 +476,8 @@ func main() {
 	initUpgrader()
 	joinLimit = newIPRateLimiter(cfg.RateLimit.JoinPerMinute, time.Minute, cfg.RateLimit.TrustForwardedIP)
 	stunLimit = newIPRateLimiter(cfg.RateLimit.StunCheckPerMinute, time.Minute, cfg.RateLimit.TrustForwardedIP)
+	go joinLimit.cleanupLoop(5 * time.Minute)
+	go stunLimit.cleanupLoop(5 * time.Minute)
 
 	go relay.cleanupLoop()
 
@@ -401,7 +494,15 @@ func main() {
 	log.Printf("   CORS origins: %v", cfg.CORS.AllowedOrigins)
 	log.Printf("   WebSocket origins: %v", cfg.WebSocket.AllowedOrigins)
 
-	if err := http.ListenAndServe(addr, securityMiddleware(mux)); err != nil {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           securityMiddleware(mux),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }

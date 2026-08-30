@@ -37,10 +37,15 @@ class RelayTransport {
 	}
 
 	async drain(threshold) {
+		let delay = 1;
 		return new Promise((resolve) => {
 			const check = () => {
-				if (this.ws.bufferedAmount <= threshold) resolve();
-				else setTimeout(check, 1);
+				if (this.ws.bufferedAmount <= threshold) {
+					resolve();
+					return;
+				}
+				setTimeout(check, delay);
+				delay = Math.min(delay * 2, 8);
 			};
 			check();
 		});
@@ -92,12 +97,22 @@ class P2pTransport {
 	}
 
 	async drain(threshold) {
+		if (this.dc.bufferedAmount <= threshold) {
+			return;
+		}
+		if ("bufferedAmountLowThreshold" in this.dc) {
+			this.dc.bufferedAmountLowThreshold = threshold;
+		}
 		return new Promise((resolve) => {
-			const check = () => {
-				if (this.dc.bufferedAmount <= threshold) resolve();
-				else setTimeout(check, 1);
+			const onLow = () => {
+				this.dc.removeEventListener("bufferedamountlow", onLow);
+				resolve();
 			};
-			check();
+			this.dc.addEventListener("bufferedamountlow", onLow);
+			if (this.dc.bufferedAmount <= threshold) {
+				this.dc.removeEventListener("bufferedamountlow", onLow);
+				resolve();
+			}
 		});
 	}
 
