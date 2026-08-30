@@ -21,6 +21,7 @@ client:
 rate_limit:
   join_per_minute: 5
   stun_check_per_minute: 2
+  trust_forwarded_ip: true
 `)
 	cfg, err := loadConfig(path)
 	if err != nil {
@@ -34,6 +35,9 @@ rate_limit:
 	}
 	if cfg.RateLimit.JoinPerMinute != 5 {
 		t.Fatalf("join limit: got %d", cfg.RateLimit.JoinPerMinute)
+	}
+	if !cfg.RateLimit.TrustForwardedIP {
+		t.Fatal("expected trust_forwarded_ip true")
 	}
 }
 

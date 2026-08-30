@@ -3,6 +3,7 @@
 (function (global) {
 	const MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB per file
 	const MAX_BATCH_BYTES = 5 * 1024 * 1024 * 1024; // 5 GiB per batch
+	const MAX_IN_MEMORY_RECEIVE_BYTES = 256 * 1024 * 1024; // 256 MiB without streaming API
 	const MAX_CHUNKS = 8192;
 	const MAX_FILE_COUNT = 100;
 	const MAX_FILENAME_LENGTH = 255;
@@ -131,6 +132,7 @@
 	global.crocSecurity = {
 		MAX_FILE_BYTES,
 		MAX_BATCH_BYTES,
+		MAX_IN_MEMORY_RECEIVE_BYTES,
 		MAX_CHUNKS,
 		MAX_FILE_COUNT,
 		MAX_FILENAME_LENGTH,

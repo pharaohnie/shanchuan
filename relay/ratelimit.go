@@ -3,16 +3,18 @@ package main
 import (
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
 
 // ipRateLimiter tracks per-IP request counts in a sliding minute window.
 type ipRateLimiter struct {
-	mu       sync.Mutex
-	limit    int
-	window   time.Duration
-	counters map[string]*rateCounter
+	mu               sync.Mutex
+	limit            int
+	window           time.Duration
+	trustForwardedIP bool
+	counters         map[string]*rateCounter
 }
 
 type rateCounter struct {
@@ -20,15 +22,32 @@ type rateCounter struct {
 	resetAt time.Time
 }
 
-func newIPRateLimiter(limit int, window time.Duration) *ipRateLimiter {
+func newIPRateLimiter(limit int, window time.Duration, trustForwardedIP bool) *ipRateLimiter {
 	return &ipRateLimiter{
-		limit:    limit,
-		window:   window,
-		counters: make(map[string]*rateCounter),
+		limit:            limit,
+		window:           window,
+		trustForwardedIP: trustForwardedIP,
+		counters:         make(map[string]*rateCounter),
 	}
 }
 
 func clientIP(r *http.Request) string {
+	return clientIPWithTrust(r, cfg.RateLimit.TrustForwardedIP)
+}
+
+func clientIPWithTrust(r *http.Request, trustForwardedIP bool) string {
+	if trustForwardedIP {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			if ip := strings.TrimSpace(parts[0]); ip != "" {
+				return ip
+			}
+		}
+		if xri := strings.TrimSpace(r.Header.Get("X-Real-IP")); xri != "" {
+			return xri
+		}
+	}
+
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

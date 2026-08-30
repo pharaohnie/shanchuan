@@ -15,8 +15,8 @@ func initTestRelay() {
 	cfg = defaultConfig()
 	cfg.WebSocket.AllowedOrigins = []string{"*"}
 	initUpgrader()
-	joinLimit = newIPRateLimiter(100, time.Minute)
-	stunLimit = newIPRateLimiter(100, time.Minute)
+	joinLimit = newIPRateLimiter(100, time.Minute, false)
+	stunLimit = newIPRateLimiter(100, time.Minute, false)
 }
 
 func TestMain(m *testing.M) {

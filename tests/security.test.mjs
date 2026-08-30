@@ -61,3 +61,8 @@ test("generateSecureCode length and charset", () => {
 	assert.equal(code.length, sec.CODE_LENGTH);
 	assert.match(code, /^[A-Za-z0-9]+$/);
 });
+
+test("MAX_IN_MEMORY_RECEIVE_BYTES is defined and below MAX_FILE_BYTES", () => {
+	assert.ok(sec.MAX_IN_MEMORY_RECEIVE_BYTES > 0);
+	assert.ok(sec.MAX_IN_MEMORY_RECEIVE_BYTES < sec.MAX_FILE_BYTES);
+});

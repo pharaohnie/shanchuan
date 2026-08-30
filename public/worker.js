@@ -16,6 +16,7 @@ const WASM_FUNCTIONS = new Set([
 let goInstance = null;
 let wasmReady = false;
 let wasmLoading = null;
+let wasmQueue = Promise.resolve();
 
 const WASM_LOAD_TIMEOUT_MS = 30000;
 
@@ -59,23 +60,28 @@ async function ensureWasm() {
 	await wasmLoading;
 }
 
-self.onmessage = async (e) => {
-	const { id, fn, args } = e.data;
-	try {
-		if (!WASM_FUNCTIONS.has(fn)) {
-			throw new Error(`Unknown WASM function: ${fn}`);
-		}
-		await ensureWasm();
-		const fnRef = self[fn];
-		if (typeof fnRef !== "function") {
-			throw new Error(`WASM export not available: ${fn}`);
-		}
-		const result = fnRef(...args);
-		const transfer = result instanceof Uint8Array ? [result.buffer] : [];
-		self.postMessage({ id, result }, transfer);
-	} catch (err) {
-		self.postMessage({ id, error: err.message });
+async function handleWasmMessage({ id, fn, args }) {
+	if (!WASM_FUNCTIONS.has(fn)) {
+		throw new Error(`Unknown WASM function: ${fn}`);
 	}
+	await ensureWasm();
+	const fnRef = self[fn];
+	if (typeof fnRef !== "function") {
+		throw new Error(`WASM export not available: ${fn}`);
+	}
+	const result = fnRef(...args);
+	const transfer = result instanceof Uint8Array ? [result.buffer] : [];
+	self.postMessage({ id, result }, transfer);
+}
+
+self.onmessage = (e) => {
+	const { id, fn, args } = e.data;
+	wasmQueue = wasmQueue.then(
+		() => handleWasmMessage({ id, fn, args }),
+		() => handleWasmMessage({ id, fn, args }),
+	).catch((err) => {
+		self.postMessage({ id, error: err.message });
+	});
 };
 
 ensureWasm();

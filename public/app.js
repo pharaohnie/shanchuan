@@ -289,13 +289,19 @@ function resetForNextFile() {
 	state.bytesWritten = 0;
 }
 
-function bindReceiverTransport(transport, enqueue, resolveOnce) {
+function bindReceiverTransport(ws, transport, enqueue, resolveOnce) {
 	state.transport = transport;
 	transport.onMessage((data) => {
 		enqueue(async () => {
 			await handleReceivedData(data);
 			if (isBatchComplete()) {
 				resolveOnce();
+				if (transport.mode === "relay") {
+					ws.send(
+						JSON.stringify({ type: crocTransferPolicy.TRANSFER_ACK }),
+					);
+					ws.close();
+				}
 			}
 		});
 	});
@@ -319,7 +325,7 @@ async function setupReceiverTransport(ws, negotiator, enqueue, resolveOnce) {
 			"receive",
 			"receiver",
 		);
-		bindReceiverTransport(transport, enqueue, resolveOnce);
+		bindReceiverTransport(ws, transport, enqueue, resolveOnce);
 		return;
 	}
 
@@ -328,7 +334,7 @@ async function setupReceiverTransport(ws, negotiator, enqueue, resolveOnce) {
 		mode === "p2p" ? p2pTransport : new RelayTransport(ws);
 	state.transport = transport;
 	updateTransportModeUI("receive", mode);
-	bindReceiverTransport(transport, enqueue, resolveOnce);
+	bindReceiverTransport(ws, transport, enqueue, resolveOnce);
 }
 
 async function setupSenderTransport(ws, assignNegotiator, flushPendingSignaling) {
@@ -507,6 +513,10 @@ async function connectAndTransfer() {
 						handleSignaling(msg);
 					} else if (msg.type === "error") {
 						rejectOnce(new Error(msg.msg || "Relay error"));
+					} else if (msg.type === crocTransferPolicy.TRANSFER_ACK) {
+						if (state.role === "sender") {
+							ws.close();
+						}
 					}
 					return;
 				}
@@ -586,7 +596,19 @@ async function connectAndTransfer() {
 						ui.setStatus("send", "密钥已建立，开始发送文件…", "key");
 						await sendAllFiles(transport);
 						resolveOnce();
-						ws.close();
+						if (
+							crocTransferPolicy.shouldCloseSenderWebSocketImmediately(
+								transport.mode,
+							)
+						) {
+							ws.close();
+						} else {
+							ws.send(
+								JSON.stringify({
+									type: crocTransferPolicy.TRANSFER_DONE,
+								}),
+							);
+						}
 					} else {
 						ui.setStatus("receive", "密钥已建立，协商 P2P 连接…", "key");
 						state._metadataReceived = false;
@@ -843,6 +865,17 @@ async function handleReceivedData(data) {
 			}
 		}
 		if (!state.streaming) {
+			if (metadata.size > crocSecurity.MAX_IN_MEMORY_RECEIVE_BYTES) {
+				const limit = formatSize(crocSecurity.MAX_IN_MEMORY_RECEIVE_BYTES);
+				if (window.showSaveFilePicker) {
+					throw new Error(
+						`文件超过 ${limit} 内存接收上限，请选择保存位置以流式写入`,
+					);
+				}
+				throw new Error(
+					`文件超过 ${limit} 内存接收上限，当前浏览器不支持流式保存`,
+				);
+			}
 			state.merged = new Uint8Array(metadata.size);
 			state.mergeOffset = 0;
 		}

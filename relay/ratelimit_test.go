@@ -9,7 +9,7 @@ import (
 )
 
 func TestIPRateLimiter(t *testing.T) {
-	rl := newIPRateLimiter(2, time.Minute)
+	rl := newIPRateLimiter(2, time.Minute, false)
 
 	if !rl.allow("1.2.3.4") || !rl.allow("1.2.3.4") {
 		t.Fatal("expected first two requests allowed")
@@ -23,7 +23,7 @@ func TestIPRateLimiter(t *testing.T) {
 }
 
 func TestRateLimitMiddleware(t *testing.T) {
-	rl := newIPRateLimiter(1, time.Minute)
+	rl := newIPRateLimiter(1, time.Minute, false)
 	handler := rl.middleware(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -40,6 +40,30 @@ func TestRateLimitMiddleware(t *testing.T) {
 	handler(rec, req)
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("second request: expected 429, got %d", rec.Code)
+	}
+}
+
+func TestClientIPWithTrustForwardedIP(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req.RemoteAddr = "10.0.0.1:1234"
+
+	if got := clientIPWithTrust(req, false); got != "10.0.0.1" {
+		t.Fatalf("without trust: got %q", got)
+	}
+
+	req.Header.Set("X-Forwarded-For", "203.0.113.5, 10.0.0.1")
+	if got := clientIPWithTrust(req, false); got != "10.0.0.1" {
+		t.Fatalf("ignored XFF: got %q", got)
+	}
+
+	if got := clientIPWithTrust(req, true); got != "203.0.113.5" {
+		t.Fatalf("trusted XFF: got %q", got)
+	}
+
+	req.Header.Del("X-Forwarded-For")
+	req.Header.Set("X-Real-IP", "198.51.100.9")
+	if got := clientIPWithTrust(req, true); got != "198.51.100.9" {
+		t.Fatalf("trusted X-Real-IP: got %q", got)
 	}
 }
 

@@ -36,8 +36,9 @@ type ClientConfig struct {
 }
 
 type RateLimitConfig struct {
-	JoinPerMinute      int `yaml:"join_per_minute"`
-	StunCheckPerMinute int `yaml:"stun_check_per_minute"`
+	JoinPerMinute      int  `yaml:"join_per_minute"`
+	StunCheckPerMinute int  `yaml:"stun_check_per_minute"`
+	TrustForwardedIP   bool `yaml:"trust_forwarded_ip"`
 }
 
 type SecurityConfig struct {

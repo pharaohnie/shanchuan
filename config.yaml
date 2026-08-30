@@ -34,6 +34,8 @@ rate_limit:
   join_per_minute: 30
   # 每个 IP 每分钟允许的 STUN 检测上报次数
   stun_check_per_minute: 10
+  # 部署在反向代理后时设为 true，从 X-Forwarded-For / X-Real-IP 读取客户端 IP
+  trust_forwarded_ip: true
 
 security:
   # Content-Security-Policy 响应头（留空则不发送）

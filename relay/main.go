@@ -21,6 +21,9 @@ var (
 	stunLimit *ipRateLimiter
 )
 
+// maxWSMessageBytes caps a single WebSocket frame (256 KiB chunk + GCM overhead + headroom).
+const maxWSMessageBytes = 2 * 1024 * 1024
+
 // Room manages two paired WebSocket connections
 type Room struct {
 	name      string
@@ -223,6 +226,9 @@ func (r *Relay) cleanupLoop() {
 }
 
 func pipeConnections(room string, a, b *websocket.Conn) {
+	a.SetReadLimit(maxWSMessageBytes)
+	b.SetReadLimit(maxWSMessageBytes)
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -253,6 +259,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Upgrade error: %v", err)
 		return
 	}
+	conn.SetReadLimit(maxWSMessageBytes)
 
 	remoteAddr := conn.RemoteAddr().String()
 	log.Printf("[relay] new connection from %s", remoteAddr)
@@ -376,8 +383,8 @@ func main() {
 	log.Printf("[relay] loaded config from %s", resolved)
 
 	initUpgrader()
-	joinLimit = newIPRateLimiter(cfg.RateLimit.JoinPerMinute, time.Minute)
-	stunLimit = newIPRateLimiter(cfg.RateLimit.StunCheckPerMinute, time.Minute)
+	joinLimit = newIPRateLimiter(cfg.RateLimit.JoinPerMinute, time.Minute, cfg.RateLimit.TrustForwardedIP)
+	stunLimit = newIPRateLimiter(cfg.RateLimit.StunCheckPerMinute, time.Minute, cfg.RateLimit.TrustForwardedIP)
 
 	go relay.cleanupLoop()
 
