@@ -185,14 +185,14 @@ async function ensureIceServersLoaded() {
 // ─── Worker Bridge ────────────────────────────────────────────────────────
 // The Go WASM module runs in a dedicated Worker; calls return Promises and
 // Uint8Array payloads are transferred zero-copy.
-const worker = new Worker("/worker.js");
+const worker = new Worker("/worker.js?v=20260830d");
 let reqId = 0;
 const pending = new Map();
 
 worker.onmessage = (e) => {
 	const { id, result, error, fatal } = e.data;
 	if (fatal) {
-		console.error("[闪传] WASM Worker fatal:", fatal);
+		crocLog.error("wasm", "Worker fatal:", fatal);
 		pending.forEach((p) => p.reject(new Error(fatal)));
 		pending.clear();
 		return;

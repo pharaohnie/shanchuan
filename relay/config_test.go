@@ -21,8 +21,10 @@ client:
   ice_servers:
     - urls: "stun:stun.example.com:3478"
     - urls: "turn:turn.example.com:3478"
-      username: "user"
-      credential: "pass"
+turn:
+  auth_secret: "secret"
+  credential_ttl_seconds: 7200
+  user_id: "turnuser"
 rate_limit:
   join_per_minute: 5
   stun_check_per_minute: 2
@@ -41,8 +43,11 @@ rate_limit:
 	if len(cfg.Client.IceServers) != 2 {
 		t.Fatalf("ice_servers: got %d entries", len(cfg.Client.IceServers))
 	}
-	if cfg.Client.IceServers[1].Username != "user" || cfg.Client.IceServers[1].Credential != "pass" {
-		t.Fatalf("turn credentials: got %+v", cfg.Client.IceServers[1])
+	if cfg.Turn.AuthSecret != "secret" || cfg.Turn.UserID != "turnuser" {
+		t.Fatalf("turn config: got %+v", cfg.Turn)
+	}
+	if cfg.Turn.CredentialTTLSeconds != 7200 {
+		t.Fatalf("credential_ttl_seconds: got %d", cfg.Turn.CredentialTTLSeconds)
 	}
 	if cfg.RateLimit.JoinPerMinute != 5 {
 		t.Fatalf("join limit: got %d", cfg.RateLimit.JoinPerMinute)

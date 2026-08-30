@@ -82,10 +82,15 @@ func TestHandleConfigAPI(t *testing.T) {
 	oldCfg := cfg
 	t.Cleanup(func() { cfg = oldCfg })
 	cfg = Config{
+		Turn: TurnConfig{
+			AuthSecret:           "test-secret",
+			CredentialTTLSeconds: 3600,
+			UserID:               "u",
+		},
 		Client: ClientConfig{
 			RelayURL: "wss://relay.test/ws",
 			IceServers: []IceServerConfig{
-				{URLs: "turn:turn.test:3478", Username: "u", Credential: "p"},
+				{URLs: "turn:turn.test:3478"},
 			},
 		},
 	}
@@ -96,11 +101,18 @@ func TestHandleConfigAPI(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "wss://relay.test/ws") {
-		t.Fatalf("unexpected body: %s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, "wss://relay.test/ws") {
+		t.Fatalf("unexpected body: %s", body)
 	}
-	if !strings.Contains(rec.Body.String(), "turn:turn.test:3478") {
-		t.Fatalf("expected ice_servers in body: %s", rec.Body.String())
+	if !strings.Contains(body, "turn:turn.test:3478") {
+		t.Fatalf("expected ice_servers in body: %s", body)
+	}
+	if strings.Contains(body, `"credential":"p"`) {
+		t.Fatalf("expected dynamic credential, not static: %s", body)
+	}
+	if !strings.Contains(body, `"username":"`) {
+		t.Fatalf("expected dynamic username in body: %s", body)
 	}
 }
 

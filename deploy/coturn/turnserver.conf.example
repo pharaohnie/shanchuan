@@ -1,0 +1,13 @@
+listening-port=3478
+fingerprint
+lt-cred-mech
+use-auth-secret
+static-auth-secret=CHANGE_ME_same_as_config_turn_auth_secret
+realm=example.com
+server-name=turn.example.com
+external-ip=203.0.113.1
+min-port=49152
+max-port=65535
+no-multicast-peers
+no-cli
+log-file=stdout

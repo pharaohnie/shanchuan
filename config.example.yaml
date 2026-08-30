@@ -1,0 +1,44 @@
+# Croc-WASM 中继服务配置示例
+# 复制为 config.yaml 后按生产环境填写（config.yaml 已加入 .gitignore，不会提交）
+
+server:
+  addr: ":18154"
+  max_rooms: 1000
+  room_inactivity_minutes: 30
+
+cors:
+  allowed_origins:
+    - "http://localhost:18154"
+    - "https://croc.example.com"
+
+websocket:
+  allowed_origins:
+    - "http://localhost:18154"
+    - "https://croc.example.com"
+
+turn:
+  # 与 deploy/coturn/turnserver.conf 的 static-auth-secret 保持一致
+  # 生成: openssl rand -hex 32
+  auth_secret: "CHANGE_ME_openssl_rand_hex_32"
+  credential_ttl_seconds: 86400
+  user_id: "turnuser"
+
+client:
+  relay_url: ""
+  public_url: "https://croc.example.com"
+  ice_servers:
+    - urls: "stun:stun.cloudflare.com:3478"
+    - urls: "turn:turn.example.com:3478?transport=udp"
+    - urls: "turn:turn.example.com:3478?transport=tcp"
+
+rate_limit:
+  join_per_minute: 30
+  stun_check_per_minute: 10
+  trust_forwarded_ip: false
+  trusted_proxy_cidrs:
+    - "127.0.0.1/32"
+    - "10.0.0.0/8"
+    # 生产环境按需添加反代 IP，例如 "203.0.113.1/32"
+
+security:
+  content_security_policy: "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; worker-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'"

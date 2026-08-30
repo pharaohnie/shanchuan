@@ -49,7 +49,7 @@ cd relay && ./relay-server
 
 默认监听 `http://localhost:8154`，在浏览器打开该地址即可使用。
 
-配置文件位于项目根目录 `config.yaml`，中继启动时会自动查找。也可手动指定：
+配置文件位于项目根目录 `config.yaml`（首次部署请复制 `config.example.yaml` 并填写生产值；`config.yaml` 不纳入版本库）。中继启动时会自动查找，也可手动指定：
 
 ```bash
 ./relay-server -config ../config.yaml
@@ -70,7 +70,7 @@ cd relay && ./relay-server
 
 ## 配置说明
 
-编辑 `config.yaml` 可调整监听地址、CORS/WebSocket Origin 白名单、房间上限、限流阈值、CSP 策略等。生产部署时请注意：
+编辑 `config.yaml` 可调整监听地址、CORS/WebSocket Origin 白名单、房间上限、限流阈值、CSP 策略等。从 [`config.example.yaml`](config.example.yaml) 复制后填写生产域名与 `turn.auth_secret`。生产部署时请注意：
 
 - 将 `cors.allowed_origins` 与 `websocket.allowed_origins` 改为实际前端域名
 - 使用 HTTPS/WSS（前置反向代理或 TLS 终止）
@@ -97,14 +97,15 @@ cd relay && ./relay-server
 
 **作用**：当两端 NAT/防火墙导致 UDP 打洞失败时，WebRTC 经 TURN 转发流量；UI 仍显示「直连 (P2P)」，与 WebSocket「中继转发」不同。
 
-**部署文件**：[`deploy/coturn/`](deploy/coturn/)（`docker-compose.yml` + `turnserver.conf` + `install.sh`）。
+**部署文件**：[`deploy/coturn/`](deploy/coturn/)（`docker-compose.yml` + `turnserver.conf.example` + `install.sh`）。
 
 在应用服务器（与 `relay-server` 同机）上：
 
 ```bash
 sudo cp -r deploy/coturn /opt/coturn
 cd /opt/coturn
-# 编辑 turnserver.conf：external-ip、user=用户名:密码
+cp turnserver.conf.example turnserver.conf
+# 编辑 turnserver.conf：external-ip、static-auth-secret（与 config.yaml turn.auth_secret 相同）
 sudo ./install.sh
 ```
 
@@ -115,36 +116,39 @@ sudo ./install.sh
 | 3478 | UDP + TCP | TURN/STUN |
 | 49152–65535 | UDP | coturn 媒体端口段 |
 
-**验证 TURN**（在任意能访问公网的服务器上）：
+**验证 TURN**（先用 relay 取临时凭据，再测试）：
 
 ```bash
-docker run --rm coturn/coturn turnutils_uclient -y -v \
-  -u <用户名> -w '<密码>' <公网IP或turn域名>
+# 从 relay 获取临时 username / credential
+curl -s https://croc.example.com/api/config | jq '.ice_servers[] | select(.urls | contains("turn"))'
+
+docker run --rm --network host coturn/coturn turnutils_uclient -y -v \
+  -u '<username>' -w '<credential>' <公网IP或turn域名>
 ```
 
 成功时应看到 relay 分配且无持续丢包。
 
 ### `config.yaml` 中的 ICE 配置
 
-TURN 账号密码通过 `GET /api/config` 下发给浏览器（WebRTC 常见做法）。`turnserver.conf` 里 `user=` 的密码须与 `credential` **完全一致**。
+TURN 使用 **临时凭据**（TURN REST API）：relay 在 `GET /api/config` 时按 `turn.auth_secret` 签发短时 `username` / `credential`；coturn 通过 `use-auth-secret` + `static-auth-secret` 校验（与 `turn.auth_secret` 相同）。`ice_servers` 中 **只需配置 URL**，不要写静态密码。
 
 ```yaml
+turn:
+  auth_secret: "<与 turnserver.conf static-auth-secret 相同>"
+  credential_ttl_seconds: 86400
+  user_id: "turnuser"
+
 client:
   public_url: "https://croc.example.com"
   ice_servers:
     - urls: "stun:stun.cloudflare.com:3478"
-    # 方式 A：公网 IP（不依赖 TURN 域名 DNS，推荐先用于联调）
     - urls: "turn:turn.croc.example.com:3478?transport=udp"
-      username: "turnuser"
-      credential: "<与 turnserver.conf 相同>"
     - urls: "turn:turn.croc.example.com:3478?transport=tcp"
-      username: "turnuser"
-      credential: "<与 turnserver.conf 相同>"
 ```
 
 留空 `ice_servers` 时，前端仅使用 Cloudflare STUN；跨复杂 NAT 时更容易回退到 WebSocket 中继。
 
-修改 `config.yaml` 或 coturn 配置后，需**重启 `relay-server`** 并**硬刷新**浏览器。
+修改 `config.yaml` 或 coturn 配置后，需**重启 coturn**、**重启 relay-server** 并**硬刷新**浏览器。
 
 **传输路径优先级**（简要）：
 
@@ -152,7 +156,7 @@ client:
 2. TURN 中继（仍属 WebRTC P2P 通道）
 3. WebSocket 中继（页面显示「中继转发」）
 
-调试：浏览器控制台执行 `localStorage.setItem('croc-debug','1'); location.reload();`，可查看 ICE 状态与 `P2P negotiate -> p2p` / `relay` 原因。
+调试：在页面 URL 加 `?debug=1` 可查看 ICE 状态与 `P2P negotiate -> p2p` / `relay` 原因。若曾开启过旧版调试，访问 `?debug=0` 可清除残留的 `localStorage.croc-debug`。
 
 ## 测试
 

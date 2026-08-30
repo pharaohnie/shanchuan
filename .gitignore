@@ -8,3 +8,7 @@ public/wasm_exec.js
 
 # OS
 .DS_Store
+
+# 生产配置（含域名、IP、密钥）；使用 *.example 模板
+config.yaml
+deploy/coturn/turnserver.conf

@@ -2,6 +2,7 @@
 // Hosts the Go WASM module so PAKE + AES-GCM run off the main thread, keeping
 // the UI responsive during large transfers. All calls are async (postMessage);
 // Uint8Array results are transferred back zero-copy.
+importScripts("/log.js?v=20260830d");
 importScripts("/wasm_exec.js");
 
 const WASM_FUNCTIONS = new Set([
@@ -80,12 +81,12 @@ self.onmessage = (e) => {
 		() => handleWasmMessage({ id, fn, args }),
 		() => handleWasmMessage({ id, fn, args }),
 	).catch((err) => {
-		console.error("[闪传worker]", fn, "failed:", err.message);
+		crocLog.error("worker", fn, "failed:", err.message);
 		self.postMessage({ id, error: err.message });
 	});
 };
 
 ensureWasm().catch((err) => {
-	console.error("[闪传worker] WASM init failed:", err.message);
+	crocLog.error("worker", "WASM init failed:", err.message);
 	self.postMessage({ fatal: `WASM init failed: ${err.message}` });
 });

@@ -89,7 +89,7 @@ func handleConfigAPI(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(ClientAPIResponse{
 		RelayURL:   cfg.Client.RelayURL,
 		PublicURL:  cfg.Client.PublicURL,
-		IceServers: cfg.Client.IceServers,
+		IceServers: buildClientIceServers(cfg),
 	})
 }
 

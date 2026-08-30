@@ -1,17 +1,45 @@
-// Debug logging (off by default). Enable: localStorage.setItem("croc-debug", "1")
+// Debug logging (off by default). Enable only: ?debug=1 in page URL
 (function (global) {
+	const nativeConsole = {
+		log: console.log.bind(console),
+		warn: console.warn.bind(console),
+		error: console.error.bind(console),
+		debug: (console.debug || console.log).bind(console),
+		info: (console.info || console.log).bind(console),
+	};
+
+	function noop() {}
+
 	function enabled() {
 		try {
-			// URL 参数 ?debug=1 一键开启（?debug=0 关闭），排障用
+			if (typeof location === "undefined") return false;
 			const qs = new URLSearchParams(location.search);
 			if (qs.has("debug")) {
-				const on = qs.get("debug") !== "0";
-				localStorage.setItem("croc-debug", on ? "1" : "0");
-				return on;
+				// ?debug=0 clears any legacy persisted flag from older builds
+				if (qs.get("debug") === "0" && typeof localStorage !== "undefined") {
+					localStorage.removeItem("croc-debug");
+				}
+				return qs.get("debug") === "1";
 			}
-			return localStorage.getItem("croc-debug") === "1";
+			return false;
 		} catch {
 			return false;
+		}
+	}
+
+	function applyConsoleSilence() {
+		if (enabled()) {
+			console.log = nativeConsole.log;
+			console.warn = nativeConsole.warn;
+			console.error = nativeConsole.error;
+			console.debug = nativeConsole.debug;
+			console.info = nativeConsole.info;
+		} else {
+			console.log = noop;
+			console.warn = noop;
+			console.error = noop;
+			console.debug = noop;
+			console.info = noop;
 		}
 	}
 
@@ -21,17 +49,17 @@
 
 	function log(role, ...args) {
 		if (!enabled()) return;
-		console.log(prefix(role), ...args);
+		nativeConsole.log(prefix(role), ...args);
 	}
 
 	function warn(role, ...args) {
 		if (!enabled()) return;
-		console.warn(prefix(role), ...args);
+		nativeConsole.warn(prefix(role), ...args);
 	}
 
 	function error(role, ...args) {
 		if (!enabled()) return;
-		console.error(prefix(role), ...args);
+		nativeConsole.error(prefix(role), ...args);
 	}
 
 	function hexPreview(bytes, n = 8) {
@@ -42,6 +70,8 @@
 			(bytes.length > n ? "…" : "")
 		);
 	}
+
+	applyConsoleSilence();
 
 	global.crocLog = { log, warn, error, hexPreview, enabled };
 })(typeof window !== "undefined" ? window : globalThis);

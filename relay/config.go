@@ -16,6 +16,7 @@ type Config struct {
 	CORS      CORSConfig      `yaml:"cors"`
 	WebSocket WebSocketConfig `yaml:"websocket"`
 	Client    ClientConfig    `yaml:"client"`
+	Turn      TurnConfig      `yaml:"turn"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
 	Security  SecurityConfig  `yaml:"security"`
 }
@@ -44,6 +45,12 @@ type ClientConfig struct {
 	RelayURL   string            `yaml:"relay_url"`
 	PublicURL  string            `yaml:"public_url"`
 	IceServers []IceServerConfig `yaml:"ice_servers"`
+}
+
+type TurnConfig struct {
+	AuthSecret           string `yaml:"auth_secret"`
+	CredentialTTLSeconds int    `yaml:"credential_ttl_seconds"`
+	UserID               string `yaml:"user_id"`
 }
 
 type RateLimitConfig struct {
@@ -116,6 +123,9 @@ func loadConfig(path string) (Config, error) {
 	}
 	if cfg.RateLimit.StunCheckPerMinute <= 0 {
 		cfg.RateLimit.StunCheckPerMinute = 10
+	}
+	if cfg.Turn.CredentialTTLSeconds <= 0 {
+		cfg.Turn.CredentialTTLSeconds = 86400
 	}
 	trustedProxyNets, err = parseTrustedProxyCIDRs(cfg.RateLimit.TrustedProxyCIDRs)
 	if err != nil {

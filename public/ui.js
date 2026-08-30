@@ -313,7 +313,7 @@ async function copyCode() {
 		flashCopied($("btn-copy-code"));
 	}).catch((err) => {
 		// 写入失败时剪贴板会保留旧内容，必须显式提示，否则用户误以为复制成功
-		console.error("复制链接失败:", err);
+		crocLog.error("ui", "复制链接失败:", err);
 		flashCopied($("btn-copy-code"), "复制失败");
 	});
 }
