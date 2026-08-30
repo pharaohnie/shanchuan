@@ -4,7 +4,7 @@
 server:
   # HTTP/WebSocket 监听地址
   # 示例: ":8154"（全部网卡）或 "127.0.0.1:8154"（仅本机）
-  addr: ":8154"
+  addr: ":18154"
   # 同时存在的最大房间数
   max_rooms: 1000
   # 房间无活动超过该分钟数后清理
@@ -14,14 +14,24 @@ cors:
   # 浏览器跨域请求（fetch、XHR）允许的 Origin 列表
   # 生产环境填写实际前端域名，如 "https://croc.example.com"
   allowed_origins:
-    - "http://localhost:8154"
+    - "http://localhost:18154"
+    - "http://192.168.1.100:18154"
+    - "http://sc.bjedu.pro"
+    - "http://sc.bjedu.pro:18154"
+    - "https://sc.bjedu.pro"
+    - "https://sc.bjedu.pro:18154"
 
 websocket:
   # WebSocket Upgrade 握手时校验的 Origin 白名单
   # 应与 cors.allowed_origins 保持一致，防止任意网站连接中继
   # 设为 ["*"] 表示允许所有来源（仅本地调试，不安全）
   allowed_origins:
-    - "http://localhost:8154"
+    - "http://localhost:18154"
+    - "http://192.168.1.100:18154"
+    - "http://sc.bjedu.pro"
+    - "http://sc.bjedu.pro:18154"
+    - "https://sc.bjedu.pro"
+    - "https://sc.bjedu.pro:18154"
 
 client:
   # 前端连接中继的 WebSocket 完整 URL

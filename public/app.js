@@ -150,7 +150,13 @@ let reqId = 0;
 const pending = new Map();
 
 worker.onmessage = (e) => {
-	const { id, result, error } = e.data;
+	const { id, result, error, fatal } = e.data;
+	if (fatal) {
+		console.error("[闪传] WASM Worker fatal:", fatal);
+		pending.forEach((p) => p.reject(new Error(fatal)));
+		pending.clear();
+		return;
+	}
 	const p = pending.get(id);
 	if (!p) return;
 	pending.delete(id);
@@ -187,6 +193,7 @@ function wasmCall(fn, ...args) {
 	return new Promise((resolve, reject) => {
 		const id = ++reqId;
 		pending.set(id, { resolve, reject });
+		crocLog.log("wasm", `→ ${fn} (#${id})`);
 		const transfer = [];
 		for (let i = args.length - 1; i >= 0; i--) {
 			if (args[i] instanceof Uint8Array) {
@@ -632,6 +639,7 @@ async function connectAndTransfer() {
 
 		// ─── PAKE init (sender sends the first PAKE message) ───────────────
 		async function runPAKEInit() {
+			crocLog.log(state.role, "runPAKEInit: start");
 			ui.setStatus(
 				state.role === "sender" ? "send" : "receive",
 				"正在协商加密密钥…",
@@ -639,10 +647,18 @@ async function connectAndTransfer() {
 			);
 			const role = state.role === "sender" ? 0 : 1;
 			await wasmCall("wasmInitPAKE", role, state.code);
+			crocLog.log(state.role, "runPAKEInit: wasmInitPAKE done");
 			pakeState = "pake";
 			if (state.role === "sender") {
 				const result = await wasmCall("wasmGetPAKEMessage");
+				crocLog.log(
+					state.role,
+					`runPAKEInit: msg1 ready (${result.message.length} chars), ws.bufferedAmount=${ws.bufferedAmount}`,
+				);
 				ws.send(new TextEncoder().encode(result.message));
+				crocLog.log(state.role, "runPAKEInit: msg1 sent, waiting for peer");
+			} else {
+				crocLog.log(state.role, "runPAKEInit: waiting for sender msg1");
 			}
 		}
 

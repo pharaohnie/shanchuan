@@ -80,8 +80,12 @@ self.onmessage = (e) => {
 		() => handleWasmMessage({ id, fn, args }),
 		() => handleWasmMessage({ id, fn, args }),
 	).catch((err) => {
+		console.error("[闪传worker]", fn, "failed:", err.message);
 		self.postMessage({ id, error: err.message });
 	});
 };
 
-ensureWasm();
+ensureWasm().catch((err) => {
+	console.error("[闪传worker] WASM init failed:", err.message);
+	self.postMessage({ fatal: `WASM init failed: ${err.message}` });
+});

@@ -2,6 +2,13 @@
 (function (global) {
 	function enabled() {
 		try {
+			// URL 参数 ?debug=1 一键开启（?debug=0 关闭），排障用
+			const qs = new URLSearchParams(location.search);
+			if (qs.has("debug")) {
+				const on = qs.get("debug") !== "0";
+				localStorage.setItem("croc-debug", on ? "1" : "0");
+				return on;
+			}
 			return localStorage.getItem("croc-debug") === "1";
 		} catch {
 			return false;

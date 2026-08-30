@@ -293,6 +293,8 @@ func pipeConnections(room *Room, roomName string, a, b *websocket.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	log.Printf("[relay] room '%s': both peers connected, piping traffic", roomName)
+
 	forward := func(src, dst *websocket.Conn) {
 		defer wg.Done()
 		defer dst.Close()
@@ -410,6 +412,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		pairedFirst, _ := json.Marshal(RelayMessage{Type: "paired", Role: "sender"})
 		pairedSecond, _ := json.Marshal(RelayMessage{Type: "paired", Role: "receiver"})
+		log.Printf("[relay] room '%s': peers paired, sending paired msgs", joinMsg.Room)
 
 		if room.first != nil {
 			room.first.WriteMessage(websocket.TextMessage, pairedFirst)
