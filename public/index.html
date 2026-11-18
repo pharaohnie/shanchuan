@@ -72,6 +72,10 @@
               <p class="drop-hint">支持多选 · 加密直传，不经过服务器</p>
               <input type="file" id="file-input" multiple hidden />
             </div>
+            <label class="share-toggle" for="toggle-cmd-download">
+              <input type="checkbox" id="toggle-cmd-download" checked />
+              <span>生成 curl 下载命令（文件会临时存到服务器，下载一次后自动删除）</span>
+            </label>
           </div>
 
           <div id="send-text-panel" class="hidden">
@@ -114,8 +118,21 @@
               </button>
             </div>
           </div>
-          <div class="status-message" id="send-status">连接中...</div>
-          <div class="progress-wrapper" id="send-progress-wrapper">
+          <div class="code-display cmd-display hidden" id="send-cmd-block">
+            <label>命令行下载（Linux / macOS）</label>
+            <div class="cmd-row">
+              <code class="cmd-value" id="send-cmd-text"></code>
+            </div>
+            <div class="cmd-actions">
+              <button type="button" class="btn btn-small" id="btn-copy-cmd">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+                <span>复制命令</span>
+              </button>
+              <span class="cmd-hint" id="send-cmd-hint"></span>
+            </div>
+          </div>
+          <p class="cmd-hint hidden" id="send-share-note"></p>
+          <div class="status-message" id="send-status">连接中...</div>          <div class="progress-wrapper" id="send-progress-wrapper">
             <div class="progress-percent-track">
               <span class="progress-percent is-at-start" id="send-progress-percent">0.0%</span>
             </div>
@@ -184,13 +201,13 @@
       </footer>
     </main>
 
-    <script src="/security.js?v=20260830b"></script>
+    <script src="/security.js?v=20260830f"></script>
     <script src="/log.js?v=20260830d"></script>
     <script src="/transport.js?v=20260830b"></script>
     <script src="/p2p.js?v=20260830d"></script>
-    <script src="/ui.js?v=20260830c"></script>
+    <script src="/ui.js?v=20260830e"></script>
     <script src="/transfer-policy.js?v=20260830c"></script>
-    <script src="/app.js?v=20260830c"></script>
+    <script src="/app.js?v=20260830f"></script>
     <script type="module" src="/bg.js"></script>
   </body>
 </html>

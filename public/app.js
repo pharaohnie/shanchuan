@@ -1,3 +1,4 @@
+// biome-ignore-all lint/correctness/noUndeclaredVariables: ui/crocLog/crocSecurity/crocTransferPolicy/RelayTransport/P2pNegotiator 由 index.html 中先加载的脚本以顶层绑定提供
 // ─── Croc-WASM Frontend ─────────────────────────────────────────────────
 // Bridges the Go WASM module (running in a Web Worker), the WebSocket relay,
 // and the browser UI. It handles:
@@ -120,6 +121,7 @@ const state = {
 	textSend: false, // true when sending prepared text file
 	isTextPayload: false, // true when receiving kind:text metadata
 	bytesWritten: 0, // streaming mode: cumulative bytes written
+	share: { id: null, key: null, status: "idle", generation: 0, xhr: null },
 };
 
 let relayUrlPromise = null;
@@ -432,6 +434,167 @@ function prepareTextFile(text) {
 	return new File([bytes], "message.txt", { type: "text/plain" });
 }
 
+// ─── Optional one-shot staging for curl downloads ─────────────────────────
+// The relay only receives deriveShareKey(code); the passcode never leaves the
+// browser. Any failure here stays isolated from the primary WebSocket transfer.
+function resetShareState() {
+	state.share.id = null;
+	state.share.key = null;
+	state.share.status = "idle";
+}
+
+function cancelShare({ deleteRemote = true, keepalive = false } = {}) {
+	const s = state.share;
+	s.generation += 1;
+	if (s.xhr) {
+		try {
+			s.xhr.abort();
+		} catch {
+			// already finished
+		}
+		s.xhr = null;
+	}
+	if (deleteRemote && s.id && s.key) {
+		fetch(`/api/share/${s.id}`, {
+			method: "DELETE",
+			headers: { "X-Share-Key": s.key },
+			keepalive,
+		}).catch(() => {});
+	}
+	resetShareState();
+	window.ui?.resetShareBlock();
+}
+
+function sharePut(file, id, key, generation) {
+	return new Promise((resolve, reject) => {
+		const xhr = new XMLHttpRequest();
+		state.share.xhr = xhr;
+		let stall = setTimeout(() => xhr.abort(), 60000);
+		const bump = () => {
+			clearTimeout(stall);
+			stall = setTimeout(() => xhr.abort(), 60000);
+		};
+		xhr.open("PUT", `/api/share/${id}`);
+		xhr.setRequestHeader("X-Share-Key", key);
+		xhr.upload.onprogress = (e) => {
+			bump();
+			if (e.lengthComputable && state.share.generation === generation) {
+				window.ui?.setShareState("uploading", {
+					percent: Math.round((e.loaded / e.total) * 100),
+				});
+			}
+		};
+		xhr.onload = () => {
+			clearTimeout(stall);
+			state.share.xhr = null;
+			if (xhr.status === 204) resolve();
+			else reject(new Error(`upload failed: ${xhr.status}`));
+		};
+		xhr.onerror = () => {
+			clearTimeout(stall);
+			state.share.xhr = null;
+			reject(new Error("upload network error"));
+		};
+		xhr.onabort = () => {
+			clearTimeout(stall);
+			state.share.xhr = null;
+			const err = new Error("upload aborted");
+			err.name = "AbortError";
+			reject(err);
+		};
+		xhr.send(file);
+	});
+}
+
+async function maybeStartShare(code, file, multiFile, generation) {
+	const stale = () => state.share.generation !== generation;
+	const cfgData = await loadClientConfig();
+	if (stale() || !cfgData?.share_enabled) return;
+	if (multiFile) {
+		window.ui?.setShareNote("命令行下载仅支持单个文件");
+		return;
+	}
+	const maxBytes = Number(cfgData.share_max_bytes) || 0;
+	if (!(maxBytes > 0) || file.size > maxBytes) return;
+	const toggle = document.getElementById("toggle-cmd-download");
+	if (toggle && !toggle.checked) return;
+
+	const key = await window.crocSecurity.deriveShareKey(code);
+	if (stale()) return;
+	state.share.key = key;
+	state.share.status = "uploading";
+	window.ui?.setShareState("uploading", { percent: 0 });
+
+	let id;
+	try {
+		const resp = await fetch("/api/share", {
+			method: "POST",
+			headers: { "Content-Type": "application/json", "X-Share-Key": key },
+			body: JSON.stringify({ name: file.name, size: file.size }),
+		});
+		if (!resp.ok) throw new Error(`create failed: ${resp.status}`);
+		id = (await resp.json()).id;
+	} catch (err) {
+		window.crocLog?.warn("share", "staging unavailable:", err.message);
+		window.ui?.setShareState("hidden");
+		resetShareState();
+		return;
+	}
+	if (stale()) {
+		fetch(`/api/share/${id}`, {
+			method: "DELETE",
+			headers: { "X-Share-Key": key },
+		}).catch(() => {});
+		return;
+	}
+	state.share.id = id;
+
+	let command;
+	try {
+		const base = await getPublicURL();
+		command = window.crocSecurity.buildCurlCommand({
+			baseURL: base,
+			shareId: id,
+			shareKey: key,
+			filename: file.name,
+		});
+	} catch (err) {
+		window.crocLog?.warn("share", "cannot build command:", err.message);
+		cancelShare();
+		return;
+	}
+	if (stale()) return;
+
+	try {
+		await sharePut(file, id, key, generation);
+	} catch (err) {
+		if (err.name === "AbortError" || stale()) return;
+		window.crocLog?.warn("share", "upload failed:", err.message);
+		cancelShare();
+		return;
+	}
+	if (stale()) return;
+	state.share.status = "ready";
+	window.ui?.setShareState("ready", { command });
+}
+
+function maybeStartShareDownload() {
+	cancelShare();
+	// 快照口令与文件：setCode 之后 state 可能被下一次「开始发送」改写
+	const code = state.code;
+	const file = state.files[0];
+	const multiFile = state.textSend || state.files.length !== 1;
+	const generation = state.share.generation;
+	if (multiFile) {
+		maybeStartShare(code, null, true, generation).catch(() => {});
+		return;
+	}
+	maybeStartShare(code, file, false, generation).catch((err) => {
+		window.crocLog?.warn("share", "unexpected:", err.message);
+		window.ui?.setShareState("hidden");
+	});
+}
+
 async function startSend(text) {
 	if (state.sendMode === "text") {
 		try {
@@ -472,6 +635,7 @@ async function startSend(text) {
 		fileLabel = `发送 ${state.files.length} 个文件`;
 	}
 	ui.setCardTitle("send", fileLabel);
+	maybeStartShareDownload();
 
 	if (state.textSend) {
 		hideProgressBar("send");
@@ -1128,6 +1292,11 @@ function publicState() {
 	};
 }
 
+window.addEventListener("pagehide", () => {
+	// 关闭/刷新页面时尽力删除服务端临时文件，避免配额被孤儿占用
+	cancelShare({ deleteRemote: true, keepalive: true });
+});
+
 window.croc = {
 	setFiles(files) {
 		state.sendMode = "file";
@@ -1138,6 +1307,7 @@ window.croc = {
 	},
 	startSend,
 	startReceive,
+	cancelShare,
 	startStunPrecheck,
 	getPublicURL,
 	MAX_TEXT_BYTES,

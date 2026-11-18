@@ -18,10 +18,13 @@ import (
 )
 
 var (
-	cfg       Config
-	upgrader  websocket.Upgrader
-	joinLimit *ipRateLimiter
-	stunLimit *ipRateLimiter
+	cfg                Config
+	upgrader           websocket.Upgrader
+	joinLimit          *ipRateLimiter
+	stunLimit          *ipRateLimiter
+	shareUploadLimit   *ipRateLimiter
+	shareDownloadLimit *ipRateLimiter
+	shareStore         *ShareStore
 )
 
 // maxWSMessageBytes caps a single WebSocket frame (256 KiB chunk + GCM overhead + headroom).
@@ -81,19 +84,23 @@ func initUpgrader() {
 }
 
 func handleConfigAPI(w http.ResponseWriter, r *http.Request) {
+	setRequestReadDeadline(w, 10*time.Second)
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ClientAPIResponse{
-		RelayURL:   cfg.Client.RelayURL,
-		PublicURL:  cfg.Client.PublicURL,
-		IceServers: buildClientIceServers(cfg),
+		RelayURL:      cfg.Client.RelayURL,
+		PublicURL:     cfg.Client.PublicURL,
+		IceServers:    buildClientIceServers(cfg),
+		ShareEnabled:  cfg.Share.Enabled,
+		ShareMaxBytes: cfg.Share.MaxBytes,
 	})
 }
 
 func handleStunCheck(w http.ResponseWriter, r *http.Request) {
+	setRequestReadDeadline(w, 10*time.Second)
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -457,8 +464,8 @@ func securityMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Vary", "Origin")
 		}
 		if r.Method == http.MethodOptions {
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Share-Key")
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -471,8 +478,25 @@ func securityMiddleware(next http.Handler) http.Handler {
 func noCacheStatic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
+		setResponseWriteDeadline(w, 60*time.Second)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// setResponseWriteDeadline bounds a single response write. ErrNotSupported is
+// expected under httptest.ResponseRecorder and must not fail the request.
+func setResponseWriteDeadline(w http.ResponseWriter, d time.Duration) {
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(d)); err != nil &&
+		!errors.Is(err, http.ErrNotSupported) {
+		log.Printf("[relay] set write deadline failed: %v", err)
+	}
+}
+
+func setRequestReadDeadline(w http.ResponseWriter, d time.Duration) {
+	if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(d)); err != nil &&
+		!errors.Is(err, http.ErrNotSupported) {
+		log.Printf("[relay] set read deadline failed: %v", err)
+	}
 }
 
 func main() {
@@ -495,10 +519,27 @@ func main() {
 
 	go relay.cleanupLoop()
 
+	if cfg.Share.Enabled {
+		shareStore, err = newShareStore(cfg.Share)
+		if err != nil {
+			log.Fatalf("Failed to init share store: %v", err)
+		}
+		go shareStore.janitor(context.Background())
+		log.Printf("   Share staging: %s (max %d MiB/file, ttl %d min)", shareStore.dir, cfg.Share.MaxBytes>>20, cfg.Share.TTLMinutes)
+	}
+	shareUploadLimit = newIPRateLimiter(cfg.Share.UploadPerMinute, time.Minute, cfg.RateLimit.TrustForwardedIP)
+	shareDownloadLimit = newIPRateLimiter(cfg.Share.DownloadPerMinute, time.Minute, cfg.RateLimit.TrustForwardedIP)
+	go shareUploadLimit.cleanupLoop(5 * time.Minute)
+	go shareDownloadLimit.cleanupLoop(5 * time.Minute)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", handleWebSocket)
 	mux.HandleFunc("/api/config", handleConfigAPI)
 	mux.HandleFunc("/api/stun-check", stunLimit.middleware(handleStunCheck))
+	mux.HandleFunc("POST /api/share", shareUploadLimit.middleware(handleShareCreate))
+	mux.HandleFunc("PUT /api/share/{id}", handleShareUpload)
+	mux.HandleFunc("DELETE /api/share/{id}", handleShareDelete)
+	mux.HandleFunc("GET /s/{id}", shareDownloadLimit.middleware(handleShareDownload))
 	mux.Handle("/", noCacheStatic(http.FileServer(http.Dir("../public"))))
 
 	addr := cfg.Server.Addr
@@ -512,8 +553,6 @@ func main() {
 		Addr:              addr,
 		Handler:           securityMiddleware(mux),
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 	if err := srv.ListenAndServe(); err != nil {

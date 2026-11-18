@@ -13,6 +13,8 @@
 	const CODE_CHARS_LEN = CODE_CHARS.length;
 	const ROOM_ID_DOMAIN = "croc-wasm/room/v1";
 	const TRANSFER_ID_DOMAIN = "croc-wasm/transfer/v1";
+	const SHARE_KEY_DOMAIN = "croc-wasm/share/v1";
+	const SHARE_ID_RE = /^[0-9a-f]{32}$/;
 	const METADATA_AAD_SEQ = 0xffffffff;
 	const METADATA_FILE_INDEX = 0xffffffff;
 	const WINDOWS_RESERVED = new Set([
@@ -30,6 +32,60 @@
 		return [...new Uint8Array(hash)]
 			.map((b) => b.toString(16).padStart(2, "0"))
 			.join("");
+	}
+
+	// 32 hex chars derived from the passcode; the relay only ever sees this
+	// value, never the code itself (which also unlocks the PAKE room).
+	async function deriveShareKey(code) {
+		if (typeof code !== "string" || !code) {
+			throw new Error("deriveShareKey: code required");
+		}
+		const data = new TextEncoder().encode(SHARE_KEY_DOMAIN + code);
+		const hash = await crypto.subtle.digest("SHA-256", data);
+		return [...new Uint8Array(hash).slice(0, 16)]
+			.map((b) => b.toString(16).padStart(2, "0"))
+			.join("");
+	}
+
+	function isSecureShareBase(url) {
+		let parsed;
+		try {
+			parsed = new URL(url);
+		} catch {
+			return false;
+		}
+		if (parsed.protocol === "https:") {
+			return true;
+		}
+		if (parsed.protocol !== "http:") {
+			return false;
+		}
+		const host = parsed.hostname.toLowerCase();
+		return host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+	}
+
+	// One-off command for downloading a staged file. No -L (curl forwards custom
+	// headers across redirects), no -OJ (refuses to overwrite, wedges --retry).
+	function shellQuote(value) {
+		return `'${String(value).replace(/'/g, "'\\''")}'`;
+	}
+
+	function buildCurlCommand({ baseURL, shareId, shareKey, filename } = {}) {
+		if (!SHARE_ID_RE.test(String(shareId))) {
+			throw new Error("buildCurlCommand: invalid share id");
+		}
+		if (!SHARE_ID_RE.test(String(shareKey))) {
+			throw new Error("buildCurlCommand: invalid share key");
+		}
+		if (typeof baseURL !== "string" || !baseURL.trim()) {
+			throw new Error("buildCurlCommand: base URL required");
+		}
+		const base = baseURL.trim().replace(/\/+$/, "");
+		if (!isSecureShareBase(base)) {
+			throw new Error("buildCurlCommand: https base URL required");
+		}
+		const outName = shellQuote(sanitizeFilename(filename));
+		return `curl -f --retry 5 --retry-delay 2 -H 'X-Share-Key: ${shareKey}' -o ${outName} '${base}/s/${shareId}'`;
 	}
 
 	async function deriveTransferId(sessionKeyBytes) {
@@ -86,7 +142,7 @@
 		// Strip path components (handles / and \).
 		let base = name.split(/[/\\]/).pop() || "download";
 		// Remove control characters and null bytes.
-		base = base.replace(/[\x00-\x1f\x7f]/g, "");
+		base = base.replace(/\p{Cc}/gu, "");
 		base = base.trim().replace(/[.\s]+$/g, "");
 		if (!base || base === "." || base === "..") {
 			return "download";
@@ -213,12 +269,15 @@
 		deriveRelayURL,
 		deriveRoomId,
 		deriveTransferId,
+		deriveShareKey,
+		buildCurlCommand,
 		encodeAAD,
 		dedupeFilename,
 		isInsecureRelayURL,
 		ROOM_ID_DOMAIN,
 		TRANSFER_ID_DOMAIN,
+		SHARE_KEY_DOMAIN,
 		METADATA_AAD_SEQ,
 		METADATA_FILE_INDEX,
 	};
-})(typeof window !== "undefined" ? window : globalThis);
+})(typeof window === "undefined" ? globalThis : window);

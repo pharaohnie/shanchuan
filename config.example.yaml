@@ -40,5 +40,20 @@ rate_limit:
     - "10.0.0.0/8"
     # 生产环境按需添加反代 IP，例如 "203.0.113.1/32"
 
+share:
+  # 一次性命令行下载：单个文件可额外暂存到 relay，curl 下载成功后立即删除。
+  # 该路径下文件在服务器上是明文（口令派生的 key 只做访问控制），见 README。
+  enabled: true
+  # 暂存目录，留空时使用 $TMPDIR/croc-share（不要放在 public/ 下）
+  dir: ""
+  max_bytes: 536870912            # 单文件上限 512 MiB（最多夹到 2 GiB）
+  max_total_bytes: 10737418240    # ready 状态文件的总配额 10 GiB
+  max_reserved_bytes: 2147483648  # 上传中（未 ready）的预留配额 2 GiB
+  ttl_minutes: 1440               # 上传完成后 24 小时内未被下载则清理
+  upload_window_seconds: 300      # 创建后必须在此时间内传完
+  upload_per_minute: 10           # 每 IP 每分钟创建暂存次数
+  download_per_minute: 60         # 每 IP 每分钟下载尝试次数
+  max_fail_per_share: 5           # 连续下载失败达到此次数后锁定 5 分钟
+
 security:
   content_security_policy: "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; worker-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'"

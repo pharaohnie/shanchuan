@@ -126,6 +126,48 @@ const ui = {
 		$("send-code").textContent = code;
 	},
 
+	// 命令行下载命令块。state: "hidden" | "uploading" | "ready" | "failed"
+	setShareState(state, opts = {}) {
+		const block = $("send-cmd-block");
+		if (!block) return;
+		const text = $("send-cmd-text");
+		const btn = $("btn-copy-cmd");
+		const hint = $("send-cmd-hint");
+		if (state !== "uploading" && state !== "ready") {
+			block.classList.add("hidden");
+			if (text) text.textContent = "";
+			return;
+		}
+		block.classList.remove("hidden");
+		if (state === "uploading") {
+			if (text) {
+				text.textContent = `正在上传到服务器… ${opts.percent ?? 0}%`;
+				text.classList.add("cmd-placeholder");
+			}
+			if (btn) btn.disabled = true;
+			if (hint) hint.textContent = "上传完成后即可用命令行下载；服务器上为明文临时存储";
+		} else {
+			if (text) {
+				text.textContent = opts.command || "";
+				text.classList.remove("cmd-placeholder");
+			}
+			if (btn) btn.disabled = false;
+			if (hint) hint.textContent = "任意一次 curl 下载成功后，文件立即从服务器删除";
+		}
+	},
+
+	setShareNote(text) {
+		const el = $("send-share-note");
+		if (!el) return;
+		el.textContent = text || "";
+		el.classList.toggle("hidden", !text);
+	},
+
+	resetShareBlock() {
+		this.setShareState("hidden");
+		this.setShareNote("");
+	},
+
 	enterTransfer(role) {
 		const setupCard =
 			role === "send" ? $("send-upload-card") : $("receive-code-card");
@@ -293,6 +335,8 @@ function renderSelectedFiles() {
 function onFilesSelected(fileList) {
 	const files = Array.from(fileList || []);
 	if (files.length === 0) return;
+	// 换文件时把上一单的临时文件从服务端删掉，避免孤儿占用配额
+	window.croc?.cancelShare?.();
 	croc.setFiles(files);
 	setSendModeUI("file");
 }
@@ -349,6 +393,17 @@ document.addEventListener("DOMContentLoaded", () => {
 		croc.startSend($("send-text-input").value),
 	);
 	$("btn-copy-code").addEventListener("click", copyCode);
+	$("btn-copy-cmd").addEventListener("click", () => {
+		const cmd = $("send-cmd-text").textContent;
+		if (!cmd) return;
+		navigator.clipboard
+			.writeText(cmd)
+			.then(() => flashCopied($("btn-copy-cmd")))
+			.catch((err) => {
+				window.crocLog?.error("ui", "复制命令失败:", err);
+				flashCopied($("btn-copy-cmd"), "复制失败");
+			});
+	});
 	$("btn-start-receive").addEventListener("click", () =>
 		croc.startReceive($("receive-code-input").value),
 	);

@@ -19,12 +19,13 @@ type Config struct {
 	Turn      TurnConfig      `yaml:"turn"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
 	Security  SecurityConfig  `yaml:"security"`
+	Share     ShareConfig     `yaml:"share"`
 }
 
 type ServerConfig struct {
-	Addr                 string `yaml:"addr"`
-	MaxRooms             int    `yaml:"max_rooms"`
-	RoomInactivityMins   int    `yaml:"room_inactivity_minutes"`
+	Addr               string `yaml:"addr"`
+	MaxRooms           int    `yaml:"max_rooms"`
+	RoomInactivityMins int    `yaml:"room_inactivity_minutes"`
 }
 
 type CORSConfig struct {
@@ -64,11 +65,28 @@ type SecurityConfig struct {
 	ContentSecurityPolicy string `yaml:"content_security_policy"`
 }
 
+// ShareConfig controls the optional one-shot staging area used by curl downloads.
+// Files are stored in plaintext and deleted after a single successful download.
+type ShareConfig struct {
+	Enabled             bool   `yaml:"enabled"`
+	Dir                 string `yaml:"dir"`
+	MaxBytes            int64  `yaml:"max_bytes"`
+	MaxTotalBytes       int64  `yaml:"max_total_bytes"`
+	MaxReservedBytes    int64  `yaml:"max_reserved_bytes"`
+	TTLMinutes          int    `yaml:"ttl_minutes"`
+	UploadWindowSeconds int    `yaml:"upload_window_seconds"`
+	UploadPerMinute     int    `yaml:"upload_per_minute"`
+	DownloadPerMinute   int    `yaml:"download_per_minute"`
+	MaxFailPerShare     int    `yaml:"max_fail_per_share"`
+}
+
 // ClientAPIResponse is returned by GET /api/config (public fields only).
 type ClientAPIResponse struct {
-	RelayURL   string            `json:"relay_url"`
-	PublicURL  string            `json:"public_url"`
-	IceServers []IceServerConfig `json:"ice_servers,omitempty"`
+	RelayURL      string            `json:"relay_url"`
+	PublicURL     string            `json:"public_url"`
+	IceServers    []IceServerConfig `json:"ice_servers,omitempty"`
+	ShareEnabled  bool              `json:"share_enabled"`
+	ShareMaxBytes int64             `json:"share_max_bytes"`
 }
 
 var trustedProxyNets []*net.IPNet
@@ -90,6 +108,17 @@ func defaultConfig() Config {
 		RateLimit: RateLimitConfig{
 			JoinPerMinute:      30,
 			StunCheckPerMinute: 10,
+		},
+		Share: ShareConfig{
+			Enabled:             true,
+			MaxBytes:            512 << 20,
+			MaxTotalBytes:       10 << 30,
+			MaxReservedBytes:    2 << 30,
+			TTLMinutes:          1440,
+			UploadWindowSeconds: 300,
+			UploadPerMinute:     10,
+			DownloadPerMinute:   60,
+			MaxFailPerShare:     5,
 		},
 	}
 }
@@ -126,6 +155,37 @@ func loadConfig(path string) (Config, error) {
 	}
 	if cfg.Turn.CredentialTTLSeconds <= 0 {
 		cfg.Turn.CredentialTTLSeconds = 86400
+	}
+	if cfg.Share.MaxBytes <= 0 {
+		cfg.Share.MaxBytes = 512 << 20
+	}
+	const shareMaxFileBytes = 2 << 30 // matches MAX_FILE_BYTES in public/security.js
+	if cfg.Share.MaxBytes > shareMaxFileBytes {
+		cfg.Share.MaxBytes = shareMaxFileBytes
+	}
+	if cfg.Share.MaxTotalBytes <= 0 {
+		cfg.Share.MaxTotalBytes = 10 << 30
+	}
+	if cfg.Share.MaxReservedBytes <= 0 {
+		cfg.Share.MaxReservedBytes = 2 << 30
+	}
+	if cfg.Share.MaxReservedBytes > cfg.Share.MaxTotalBytes {
+		cfg.Share.MaxReservedBytes = cfg.Share.MaxTotalBytes
+	}
+	if cfg.Share.TTLMinutes <= 0 {
+		cfg.Share.TTLMinutes = 1440
+	}
+	if cfg.Share.UploadWindowSeconds <= 0 {
+		cfg.Share.UploadWindowSeconds = 300
+	}
+	if cfg.Share.UploadPerMinute <= 0 {
+		cfg.Share.UploadPerMinute = 10
+	}
+	if cfg.Share.DownloadPerMinute <= 0 {
+		cfg.Share.DownloadPerMinute = 60
+	}
+	if cfg.Share.MaxFailPerShare <= 0 {
+		cfg.Share.MaxFailPerShare = 5
 	}
 	trustedProxyNets, err = parseTrustedProxyCIDRs(cfg.RateLimit.TrustedProxyCIDRs)
 	if err != nil {

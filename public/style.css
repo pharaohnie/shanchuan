@@ -961,3 +961,58 @@ body {
 		transition-duration: 0.01ms !important;
 	}
 }
+
+/* ─── Share / curl command ──────────────────────────────────────────────── */
+.share-toggle {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--space-xs);
+	margin-top: var(--space-sm);
+	color: var(--ink-3);
+	font-size: var(--text-xs);
+	line-height: 1.5;
+	cursor: pointer;
+}
+
+.share-toggle input[type="checkbox"] {
+	margin-top: 0.15em;
+	accent-color: var(--signal);
+	flex: none;
+}
+
+.cmd-display .cmd-row {
+	background: var(--paper-sunken);
+	border: 1px solid var(--rule-strong);
+	border-radius: var(--radius);
+	padding: var(--space-sm) var(--space-md);
+	overflow-x: auto;
+}
+
+.cmd-value {
+	display: block;
+	font-family: var(--font-mono);
+	font-size: var(--text-xs);
+	line-height: 1.6;
+	color: var(--ink);
+	white-space: pre;
+	user-select: all;
+}
+
+.cmd-value.cmd-placeholder {
+	color: var(--ink-3);
+	white-space: normal;
+}
+
+.cmd-actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--space-xs);
+	margin-top: var(--space-xs);
+}
+
+.cmd-hint {
+	color: var(--ink-3);
+	font-size: var(--text-xs);
+	line-height: 1.5;
+}
