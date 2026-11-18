@@ -57,11 +57,51 @@ rate_limit:
 	}
 }
 
+func TestShareDisabledByDefault(t *testing.T) {
+	cfg, err := loadConfig(writeTempConfig(t, `
+server:
+  addr: ":9999"
+`))
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Share.Enabled {
+		t.Fatal("expected share disabled when config has no share section")
+	}
+}
+
+func TestWSDefaults(t *testing.T) {
+	cfg := defaultConfig()
+	if cfg.WebSocket.JoinTimeoutSeconds != 10 {
+		t.Fatalf("join_timeout_seconds: got %d", cfg.WebSocket.JoinTimeoutSeconds)
+	}
+	if cfg.RateLimit.MaxWSConnsPerIP != 8 {
+		t.Fatalf("max_ws_conns_per_ip: got %d", cfg.RateLimit.MaxWSConnsPerIP)
+	}
+}
+
+func TestTurnAndConfigDefaults(t *testing.T) {
+	cfg, err := loadConfig(writeTempConfig(t, `
+server:
+  addr: ":9999"
+`))
+	if err != nil {
+		t.Fatalf("loadConfig: %v", err)
+	}
+	if cfg.Turn.CredentialTTLSeconds != 600 {
+		t.Fatalf("credential_ttl_seconds: got %d", cfg.Turn.CredentialTTLSeconds)
+	}
+	if cfg.RateLimit.ConfigPerMinute != 60 {
+		t.Fatalf("config_per_minute: got %d", cfg.RateLimit.ConfigPerMinute)
+	}
+}
+
 func TestOriginAllowed(t *testing.T) {
+	wildcard := "*"
 	cfg := Config{
 		CORS: CORSConfig{AllowedOrigins: []string{"http://localhost:8154"}},
 		WebSocket: WebSocketConfig{
-			AllowedOrigins: []string{"http://localhost:8154", "*"},
+			AllowedOrigins: []string{"http://localhost:8154", wildcard},
 		},
 	}
 	if !cfg.originAllowed(cfg.CORS.AllowedOrigins, "http://localhost:8154") {

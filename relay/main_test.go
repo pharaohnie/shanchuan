@@ -13,11 +13,24 @@ import (
 
 func initTestRelay() {
 	cfg = defaultConfig()
-	cfg.WebSocket.AllowedOrigins = []string{"*"}
+	wildcard := "*"
+	cfg.WebSocket.AllowedOrigins = []string{wildcard}
 	cfg.Server.MaxRooms = 1000
 	initUpgrader()
 	joinLimit = newIPRateLimiter(100, time.Minute, false)
+	wsConnLimit = newIPConnLimiter(cfg.RateLimit.MaxWSConnsPerIP)
 	stunLimit = newIPRateLimiter(100, time.Minute, false)
+}
+
+func resetWSLimits(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		joinLimit = newIPRateLimiter(1000, time.Minute, false)
+		wsConnLimit = newIPConnLimiter(8)
+		cfg.WebSocket.JoinTimeoutSeconds = 10
+	}
+	reset()
+	t.Cleanup(reset)
 }
 
 func TestMain(m *testing.M) {
@@ -159,6 +172,107 @@ func TestHandleWebSocketFirstClientExpires(t *testing.T) {
 	_, _, err = conn.ReadMessage()
 	if err == nil {
 		t.Fatal("expected connection closed after expire")
+	}
+}
+
+func TestSecurityHeadersIncludeHSTS(t *testing.T) {
+	cfg = defaultConfig()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	securityMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})).ServeHTTP(rec, req)
+	if hsts := rec.Header().Get("Strict-Transport-Security"); !strings.Contains(hsts, "max-age=") {
+		t.Fatalf("missing HSTS header: %q", hsts)
+	}
+}
+
+func TestJoinRateLimitBeforeUpgrade(t *testing.T) {
+	resetWSLimits(t)
+	joinLimit = newIPRateLimiter(1, time.Minute, false)
+
+	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	rec := httptest.NewRecorder()
+	handleWebSocket(rec, req)
+	if rec.Code == http.StatusTooManyRequests {
+		t.Fatal("first request should not be rate limited")
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/ws", nil)
+	rec = httptest.NewRecorder()
+	handleWebSocket(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request: expected 429 before upgrade, got %d", rec.Code)
+	}
+}
+
+func TestWSConcurrentLimitPerIP(t *testing.T) {
+	resetWSLimits(t)
+	wsConnLimit = newIPConnLimiter(1)
+	relay.rooms = make(map[string]*Room)
+
+	server := httptest.NewServer(http.HandlerFunc(handleWebSocket))
+	defer server.Close()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	dialer := websocket.Dialer{}
+
+	first, _, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("first dial: %v", err)
+	}
+	if err := first.WriteMessage(websocket.TextMessage, []byte(`{"type":"join","room":"conn-limit"}`)); err != nil {
+		t.Fatalf("write join: %v", err)
+	}
+	if _, _, err := first.ReadMessage(); err != nil {
+		t.Fatalf("read waiting: %v", err)
+	}
+
+	second, resp, err := dialer.Dial(wsURL, nil)
+	if err == nil {
+		second.Close()
+		t.Fatal("second dial should be rejected")
+	}
+	if resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 handshake rejection, got %+v", resp)
+	}
+
+	first.Close()
+	// 服务端未在读首帧后继续读，CloseHandler 不会自行触发；显式过期房间以释放名额。
+	if room, err := relay.getOrCreateRoom("conn-limit"); err == nil {
+		room.expire("test cleanup")
+		room.closeDone()
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		conn, _, err := dialer.Dial(wsURL, nil)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("connection slot not released: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestJoinTimeoutClosesIdleConnection(t *testing.T) {
+	resetWSLimits(t)
+	cfg.WebSocket.JoinTimeoutSeconds = 1
+	relay.rooms = make(map[string]*Room)
+
+	server := httptest.NewServer(http.HandlerFunc(handleWebSocket))
+	defer server.Close()
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Fatal("expected connection to close after join timeout")
 	}
 }
 

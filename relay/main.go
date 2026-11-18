@@ -21,7 +21,9 @@ var (
 	cfg                Config
 	upgrader           websocket.Upgrader
 	joinLimit          *ipRateLimiter
+	wsConnLimit        *ipConnLimiter
 	stunLimit          *ipRateLimiter
+	configLimit        *ipRateLimiter
 	shareUploadLimit   *ipRateLimiter
 	shareDownloadLimit *ipRateLimiter
 	shareStore         *ShareStore
@@ -90,6 +92,9 @@ func handleConfigAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	// 凭据每次请求都重新签发，禁止任何层缓存。
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	json.NewEncoder(w).Encode(ClientAPIResponse{
 		RelayURL:      cfg.Client.RelayURL,
 		PublicURL:     cfg.Client.PublicURL,
@@ -178,6 +183,7 @@ func logTransportMode(room string, msgType int, msg []byte) {
 	if !ok {
 		return
 	}
+	room = truncateForLog(room, 128)
 	switch mode {
 	case "p2p":
 		log.Printf("[relay] room '%s': transfer via P2P (file data bypasses relay)", room)
@@ -233,7 +239,7 @@ func (r *Relay) getOrCreateRoom(name string) (*Room, error) {
 func (r *Relay) deleteRoom(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	log.Printf("[relay] delete room '%s'", name)
+	log.Printf("[relay] delete room '%s'", truncateForLog(name, 128))
 	delete(r.rooms, name)
 }
 
@@ -267,7 +273,7 @@ func (r *Relay) cleanupLoop() {
 			last := room.lastActivity
 			room.mu.Unlock()
 			if time.Since(last) > inactivity {
-				log.Printf("[relay] cleanup stale room '%s'", name)
+				log.Printf("[relay] cleanup stale room '%s'", truncateForLog(name, 128))
 				delete(r.rooms, name)
 				stale = append(stale, room)
 			}
@@ -287,7 +293,7 @@ func watchFirstClientDisconnect(conn *websocket.Conn, room *Room, ctx context.Co
 		if ctx.Err() != nil {
 			return nil
 		}
-		log.Printf("[relay] room '%s': first client disconnected (code=%d)", room.name, code)
+		log.Printf("[relay] room '%s': first client disconnected (code=%d)", truncateForLog(room.name, 128), code)
 		room.expire("Peer disconnected")
 		room.closeDone()
 		return nil
@@ -329,12 +335,29 @@ func pipeConnections(room *Room, roomName string, a, b *websocket.Conn) {
 }
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// 限流必须发生在 Upgrade 之前：握手会分配 2×256KiB 缓冲，
+	// 若读完首帧才限流，攻击者可用空连接白嫖内存。
+	ip := clientIP(r)
+	if !joinLimit.allow(ip) {
+		log.Printf("[relay] %s: join rate limit exceeded", truncateForLog(r.RemoteAddr, 128))
+		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+		return
+	}
+	if !wsConnLimit.acquire(ip) {
+		log.Printf("[relay] %s: too many concurrent connections", truncateForLog(r.RemoteAddr, 128))
+		http.Error(w, "too many connections", http.StatusTooManyRequests)
+		return
+	}
+	defer wsConnLimit.release(ip)
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("Upgrade error: %v", err)
 		return
 	}
 	conn.SetReadLimit(maxWSMessageBytes)
+	joinTimeout := time.Duration(cfg.WebSocket.JoinTimeoutSeconds) * time.Second
+	conn.SetReadDeadline(time.Now().Add(joinTimeout))
 
 	remoteAddr := conn.RemoteAddr().String()
 	log.Printf("[relay] new connection from %s", remoteAddr)
@@ -365,16 +388,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		conn.Close()
 		return
 	}
+	// 首帧已成功解析，清除 join 超时；后续传输不设读超时。
+	conn.SetReadDeadline(time.Time{})
 
-	if !joinLimit.allow(clientIP(r)) {
-		log.Printf("[relay] %s: join rate limit exceeded", remoteAddr)
-		fullMsg, _ := json.Marshal(RelayMessage{Type: "error", Msg: "Rate limit exceeded"})
-		conn.WriteMessage(websocket.TextMessage, fullMsg)
-		conn.Close()
-		return
-	}
-
-	log.Printf("[relay] %s joining room '%s'", remoteAddr, joinMsg.Room)
+	roomName := truncateForLog(joinMsg.Room, 128)
+	log.Printf("[relay] %s joining room '%s'", remoteAddr, roomName)
 
 	room, err := relay.getOrCreateRoom(joinMsg.Room)
 	if err != nil {
@@ -413,7 +431,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		pipeConnections(room, joinMsg.Room, first, second)
+		pipeConnections(room, roomName, first, second)
 		relay.deleteRoom(joinMsg.Room)
 
 	} else if room.second == nil {
@@ -421,7 +439,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		pairedFirst, _ := json.Marshal(RelayMessage{Type: "paired", Role: "sender"})
 		pairedSecond, _ := json.Marshal(RelayMessage{Type: "paired", Role: "receiver"})
-		log.Printf("[relay] room '%s': peers paired, sending paired msgs", joinMsg.Room)
+		log.Printf("[relay] room '%s': peers paired, sending paired msgs", roomName)
 
 		if room.first != nil {
 			room.first.WriteMessage(websocket.TextMessage, pairedFirst)
@@ -434,7 +452,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-room.done:
 		case <-time.After(roomDoneWait):
-			log.Printf("[relay] room '%s': second client timed out waiting for transfer", joinMsg.Room)
+			log.Printf("[relay] room '%s': second client timed out waiting for transfer", roomName)
 		}
 		relay.deleteRoom(joinMsg.Room)
 
@@ -452,6 +470,7 @@ func securityMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		if csp := cfg.Security.ContentSecurityPolicy; csp != "" {
 			w.Header().Set("Content-Security-Policy", csp)
 		}
@@ -513,9 +532,12 @@ func main() {
 
 	initUpgrader()
 	joinLimit = newIPRateLimiter(cfg.RateLimit.JoinPerMinute, time.Minute, cfg.RateLimit.TrustForwardedIP)
+	wsConnLimit = newIPConnLimiter(cfg.RateLimit.MaxWSConnsPerIP)
 	stunLimit = newIPRateLimiter(cfg.RateLimit.StunCheckPerMinute, time.Minute, cfg.RateLimit.TrustForwardedIP)
+	configLimit = newIPRateLimiter(cfg.RateLimit.ConfigPerMinute, time.Minute, cfg.RateLimit.TrustForwardedIP)
 	go joinLimit.cleanupLoop(5 * time.Minute)
 	go stunLimit.cleanupLoop(5 * time.Minute)
+	go configLimit.cleanupLoop(5 * time.Minute)
 
 	go relay.cleanupLoop()
 
@@ -534,7 +556,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", handleWebSocket)
-	mux.HandleFunc("/api/config", handleConfigAPI)
+	mux.HandleFunc("/api/config", configLimit.middleware(handleConfigAPI))
 	mux.HandleFunc("/api/stun-check", stunLimit.middleware(handleStunCheck))
 	mux.HandleFunc("POST /api/share", shareUploadLimit.middleware(handleShareCreate))
 	mux.HandleFunc("PUT /api/share/{id}", handleShareUpload)
@@ -554,6 +576,7 @@ func main() {
 		Handler:           securityMiddleware(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    32 << 10,
 	}
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatal(err)

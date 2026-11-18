@@ -64,6 +64,25 @@ func TestClientIPWithTrustForwardedIP(t *testing.T) {
 		t.Fatalf("trusted XFF from proxy: got %q", got)
 	}
 
+	// NPM 默认 $proxy_add_x_forwarded_for 会把真实客户端追加在末尾；
+	// 最左段是客户端可伪造的，必须忽略。
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 203.0.113.5, 10.0.0.1")
+	if got := clientIPWithTrust(req, true); got != "203.0.113.5" {
+		t.Fatalf("rightmost untrusted XFF: got %q", got)
+	}
+
+	req.Header.Set("X-Forwarded-For", "2001:db8::1, 10.0.0.1")
+	if got := clientIPWithTrust(req, true); got != "2001:db8::1" {
+		t.Fatalf("IPv6 XFF: got %q", got)
+	}
+
+	// 整条链都可信时退回 X-Real-IP。
+	req.Header.Set("X-Forwarded-For", "10.0.0.2, 10.0.0.1")
+	req.Header.Set("X-Real-IP", "198.51.100.9")
+	if got := clientIPWithTrust(req, true); got != "198.51.100.9" {
+		t.Fatalf("all-trusted XFF fallback: got %q", got)
+	}
+
 	req.Header.Del("X-Forwarded-For")
 	req.Header.Set("X-Real-IP", "198.51.100.9")
 	if got := clientIPWithTrust(req, true); got != "198.51.100.9" {
@@ -100,6 +119,9 @@ func TestHandleConfigAPI(t *testing.T) {
 	handleConfigAPI(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("config must not be cached: %q", rec.Header().Get("Cache-Control"))
 	}
 	body := rec.Body.String()
 	if !strings.Contains(body, "wss://relay.test/ws") {

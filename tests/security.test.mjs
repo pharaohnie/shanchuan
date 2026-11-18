@@ -57,6 +57,7 @@ test("validateSendFiles enforces per-file limit", () => {
 });
 
 test("generateSecureCode length and charset", () => {
+	assert.equal(sec.CODE_LENGTH, 12);
 	const code = sec.generateSecureCode();
 	assert.equal(code.length, sec.CODE_LENGTH);
 	assert.match(code, /^[A-Za-z0-9]+$/);

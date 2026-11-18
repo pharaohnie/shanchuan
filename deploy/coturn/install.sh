@@ -15,7 +15,19 @@ cd "$SCRIPT_DIR"
 if [ ! -f turnserver.conf ]; then
   cp turnserver.conf.example turnserver.conf
   echo "已从 turnserver.conf.example 创建 turnserver.conf，请编辑后再启动。"
+  exit 1
 fi
+
+if grep -q "CHANGE_ME" turnserver.conf; then
+  echo "错误: turnserver.conf 仍有 CHANGE_ME 占位符，请填写生产值后再运行。" >&2
+  exit 1
+fi
+secret="$(sed -n 's/^static-auth-secret=//p' turnserver.conf | head -n1)"
+if [ "${#secret}" -lt 32 ]; then
+  echo "错误: static-auth-secret 长度不足 32 字符，请用 openssl rand -hex 32 生成。" >&2
+  exit 1
+fi
+
 docker compose up -d
 echo "coturn 已启动。请确认 DNS: turn.example.com -> 应用服务器公网 IP"
 echo "验证: curl -s https://croc.example.com/api/config | jq '.ice_servers[] | select(.urls|contains(\"turn\"))'"

@@ -60,3 +60,16 @@ docker run --rm --network host coturn/coturn turnutils_uclient -y -v \
 ```
 
 成功输出应包含 relay 分配信息。
+
+## 5. 镜像固定
+
+`docker-compose.yml` 固定到 coturn 的镜像 digest，不使用 `latest`。升级时先拉取、取新 digest、改 compose，再重启：
+
+```bash
+docker pull coturn/coturn:latest
+docker inspect --format '{{index .RepoDigests 0}}' coturn/coturn:latest
+# 把输出的 coturn/coturn@sha256:... 写回 docker-compose.yml 的 image
+docker compose up -d
+```
+
+升级后按第 4 节重新验证 TURN 凭据与中继。

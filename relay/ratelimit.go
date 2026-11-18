@@ -22,6 +22,38 @@ type rateCounter struct {
 	resetAt time.Time
 }
 
+// ipConnLimiter caps concurrent connections per IP. acquire must be paired
+// with release on every return path that follows a successful acquire.
+type ipConnLimiter struct {
+	mu     sync.Mutex
+	limit  int
+	counts map[string]int
+}
+
+func newIPConnLimiter(limit int) *ipConnLimiter {
+	return &ipConnLimiter{limit: limit, counts: make(map[string]int)}
+}
+
+func (l *ipConnLimiter) acquire(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.limit > 0 && l.counts[key] >= l.limit {
+		return false
+	}
+	l.counts[key]++
+	return true
+}
+
+func (l *ipConnLimiter) release(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.counts[key] <= 1 {
+		delete(l.counts, key)
+		return
+	}
+	l.counts[key]--
+}
+
 func newIPRateLimiter(limit int, window time.Duration, trustForwardedIP bool) *ipRateLimiter {
 	return &ipRateLimiter{
 		limit:            limit,
@@ -38,8 +70,14 @@ func clientIP(r *http.Request) string {
 func clientIPWithTrust(r *http.Request, trustForwardedIP bool) string {
 	if trustForwardedIP && isTrustedProxy(r.RemoteAddr) {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			// 从右往左扫：反代通常把真实客户端追加在末尾，左边是客户端
+			// 可伪造的前缀。跳过可信代理，返回第一个不可信地址。
 			parts := strings.Split(xff, ",")
-			if ip := strings.TrimSpace(parts[0]); ip != "" {
+			for i := len(parts) - 1; i >= 0; i-- {
+				ip := strings.TrimSpace(parts[i])
+				if ip == "" || isTrustedProxyIP(ip) {
+					continue
+				}
 				return ip
 			}
 		}

@@ -7,12 +7,20 @@
 ## 功能特点
 
 - **端到端加密**：PAKE 口令认证 + AES-GCM 加密，中继服务器无法解密文件内容（仅浏览器的文件/文本传输走此路径）
+- **批次完整性校验（协议 v2）**：发送前先传一份加密文件清单，接收端只接受清单内的序号，缺失、重复或字段不符会报错并列出缺了哪些文件；对端版本较旧时回退 v1，并明确提示“未校验文件清单”
 - **口令与房间 ID 解耦**：加入房间时发送口令哈希，降低口令明文暴露面
 - **智能传输路径**：STUN 直连优先，可选 TURN 提升跨网段成功率，失败时回退 WebSocket 中继
 - **多文件与文本**：支持拖拽多选文件、纯文本发送；接收方可流式下载大文件
-- **命令行下载（可选）**：单个文件可额外给出一条 `curl` 命令，下载一次后服务端立即删除（见[下文](#命令行下载curl)）
+- **命令行下载（服务端开启后自动生成）**：单个文件发送时会自动给出一条 `curl` 命令，下载一次后服务端立即删除（见[下文](#命令行下载curl)）
 - **零账号**：无需注册登录，分享口令即可传输
 - **安全加固**：限流防暴力枚举、CSP 安全头、文件名消毒、AAD 绑定防篡改、公网 `ws://` 明文拦截
+
+## 安全边界（威胁模型）
+
+- **保护**：不知道口令的中继或网络观察者无法解密文件内容，也无法冒充对端；文件分块与元数据都用 AAD 绑定到会话，篡改会解密失败。
+- **不保护**：口令本身泄露、端点被控、屏幕录制。PAKE 不能阻止“先录下加密流量、再离线爆破口令、最后解密旧流量”的路径。
+- roomId 目前由口令的 SHA-256 派生，12 位口令约 71.5 bit。中继日志里的 roomId 是一个可离线验证口令的哈希；协议 v2 计划改用慢 KDF 或随机房间令牌，取舍见 [docs/protocol-v2.md](docs/protocol-v2.md)。
+- curl 分享是服务端明文暂存，端到端加密不覆盖这条路径；该功能默认关闭。
 
 ## 环境要求
 
@@ -63,7 +71,7 @@ cd relay && ./relay-server
 1. 点击「发送」，选择文件或输入文本
 2. 点击「开始发送」，复制生成的口令码
 3. 将口令码分享给接收方，等待传输完成
-4. （可选）单个文件默认会额外给出 `curl` 下载命令，见下一节
+4. 服务端开启 `share.enabled` 后，单个文件会自动生成 `curl` 下载命令，见下一节
 
 **接收方**
 
@@ -72,18 +80,19 @@ cd relay && ./relay-server
 
 ### 命令行下载（curl）
 
-发送单个文件时，页面会在口令码下方给出一条命令，形如：
+服务端 `share.enabled: true` 时，发送单个文件会在口令码下方自动出现一条命令，形如：
 
 ```bash
 curl -f --retry 5 --retry-delay 2 -H 'X-Share-Key: <32位十六进制>' -o '原文件名.pdf' 'https://croc.example.com/s/<32位十六进制>'
 ```
 
-- 口令码本身不会离开浏览器：浏览器先算 `SHA256("croc-wasm/share/v1" + 口令码)` 的前 16 字节，服务端只保存它的 HMAC，无法反推房间 ID 或 PAKE 口令。
+- 分享密钥与口令无关：浏览器用 `crypto.getRandomValues` 随机生成 16 字节 token（32 位十六进制），服务端只保存它的 HMAC，因此从分享密钥推不出口令，也推不出房间 ID。
 - 下载一次成功后服务端立即删除；未下载的文件默认保留 24 小时。失败可重试，命令不用重跑；`HEAD`（`curl -I`）不消耗文件。
 - 上传完成前执行命令会得到 503 + `Retry-After`，`--retry` 会自动等。命令不带 `-L`（curl 会把自定义头转发给跳转目标），也不带 `-OJ`（同名文件不覆盖，会卡住重试）。
 - 命令里的 `-o` 用上传时的原文件名（单引号包裹，名字里的 `'` 会被转义），会在当前目录下写同名文件并覆盖已有同名文件；想换名字就自己改 `-o` 后面的值。
 - 只支持**单个文件**、非文本模式；文件超过 `share.max_bytes` 时不会出现命令。
-- **该路径下文件在服务端是明文临时存储**（HTTPS + 一次性口令做访问控制），与浏览器间的端到端加密不是同一回事。不需要可以在发送页取消勾选「生成 curl 下载命令」。
+- `X-Share-Key` 会作为命令行参数出现在 shell 历史和进程列表里；多人共用主机时建议改成从环境变量读取（如 `-H "X-Share-Key: $SHARE_KEY"`），用完清掉变量。
+- **该路径下文件在服务端是明文临时存储**（HTTPS + 随机一次性密钥做访问控制），与浏览器间的端到端加密不是同一回事。服务端默认关闭；开启后每个符合条件的单文件发送都会自动留一份明文副本，不需要时把 `share.enabled` 设回 `false`。
 
 ## 配置说明
 
@@ -94,7 +103,7 @@ curl -f --retry 5 --retry-delay 2 -H 'X-Share-Key: <32位十六进制>' -o '原�
 - 按需设置 `client.relay_url` 为完整的 `wss://` 地址
 - 按需设置 `client.public_url` 为分享链接前缀（如 `https://croc.example.com`）
 - 跨网段提高 P2P 成功率时，部署 TURN 并配置 `client.ice_servers`（见下文）
-- 需要命令行下载时保留 `share.enabled: true`，并按磁盘容量调整 `share.max_bytes` / `share.max_total_bytes`
+- 需要命令行下载时把 `share.enabled` 设为 `true`（默认 `false`），并按磁盘容量调整 `share.max_bytes` / `share.max_total_bytes`
 
 ### 域名与反代分工
 
@@ -107,8 +116,18 @@ curl -f --retry 5 --retry-delay 2 -H 'X-Share-Key: <32位十六进制>' -o '原�
 
 说明：
 
-- WebSocket 中继（`wss://croc.example.com/ws`）走 HTTPS 反代即可。
+- WebSocket 中继（`wss://croc.example.com/ws`）走 HTTPS 反代即可。NPM 与 relay 同机时监听 `127.0.0.1:18154`；不同机时监听 `0.0.0.0:18154` 或内网网卡，并用防火墙**只放行 NPM 的出口 IP**。不要把 18154 暴露给公网，否则可绕过 NPM 的 HTTPS 直连明文 HTTP。
+- relay 的 `trusted_proxy_cidrs` 必须包含 NPM 的实际出口 IP，否则所有客户端会被当成同一个 IP 限流；加完后确认日志/限流里拿到的是真实客户端地址。
 - TURN 依赖 **UDP**（3478 + 49152–65535），常见 HTTP 反代无法可靠转发，必须在 relay 同机或可达公网 IP 上单独部署 coturn。
+
+**Nginx Proxy Manager（NPM）建议**：SSL 页开启 HSTS 与 Force SSL（80→443）；Advanced 里补超时和大上传配置，避免长连接被默认 60 秒切断：
+
+```nginx
+proxy_read_timeout 3600s;
+proxy_send_timeout 3600s;
+proxy_request_buffering off;
+client_max_body_size 2g;
+```
 - `turn.croc.example.com` 与 `croc.example.com` 是**两个独立 A 记录**；未给 TURN 配 DNS 时，可在 `ice_servers` 中暂时写公网 IP（见下）。
 
 ### TURN 服务器（coturn）
@@ -131,6 +150,7 @@ sudo ./install.sh
 
 | 端口 | 协议 | 用途 |
 |------|------|------|
+| 18154 | TCP | NPM 反代 relay；只放行 NPM 的出口 IP |
 | 3478 | UDP + TCP | TURN/STUN |
 | 49152–65535 | UDP | coturn 媒体端口段 |
 
@@ -153,7 +173,7 @@ TURN 使用 **临时凭据**（TURN REST API）：relay 在 `GET /api/config` �
 ```yaml
 turn:
   auth_secret: "<与 turnserver.conf static-auth-secret 相同>"
-  credential_ttl_seconds: 86400
+  credential_ttl_seconds: 600   # 默认 10 分钟
   user_id: "turnuser"
 
 client:

@@ -2,6 +2,8 @@
 # 复制为 config.yaml 后按生产环境填写（config.yaml 已加入 .gitignore，不会提交）
 
 server:
+  # 反代与 relay 不同机：":18154" 监听所有网卡，并用防火墙只放行反代 IP。
+  # 同机部署：建议 "127.0.0.1:18154"，避免绕过 HTTPS 直连。
   addr: ":18154"
   max_rooms: 1000
   room_inactivity_minutes: 30
@@ -15,12 +17,14 @@ websocket:
   allowed_origins:
     - "http://localhost:18154"
     - "https://croc.example.com"
+  # Upgrade 后等待首帧 join 的秒数，超时断开；防止空连接长期占用内存
+  join_timeout_seconds: 10
 
 turn:
   # 与 deploy/coturn/turnserver.conf 的 static-auth-secret 保持一致
   # 生成: openssl rand -hex 32
   auth_secret: "CHANGE_ME_openssl_rand_hex_32"
-  credential_ttl_seconds: 86400
+  credential_ttl_seconds: 600
   user_id: "turnuser"
 
 client:
@@ -34,23 +38,28 @@ client:
 rate_limit:
   join_per_minute: 30
   stun_check_per_minute: 10
+  config_per_minute: 60
+  # 每个 IP 同时保持的 WebSocket 连接上限（含等待配对的连接）
+  max_ws_conns_per_ip: 8
   trust_forwarded_ip: false
+  # 只列出实际反向代理的来源 IP/网段；不要填 10/8、172.16/12、192.168/16
+  # 这类整段私网，否则同网段主机可伪造 X-Forwarded-For 绕过限流。
   trusted_proxy_cidrs:
     - "127.0.0.1/32"
-    - "10.0.0.0/8"
     # 生产环境按需添加反代 IP，例如 "203.0.113.1/32"
 
 share:
   # 一次性命令行下载：单个文件可额外暂存到 relay，curl 下载成功后立即删除。
-  # 该路径下文件在服务器上是明文（口令派生的 key 只做访问控制），见 README。
-  enabled: true
+  # 默认关闭；开启后该路径下文件在服务器上是明文（口令派生的 key 只做访问控制），见 README。
+  enabled: false
   # 暂存目录，留空时使用 $TMPDIR/croc-share（不要放在 public/ 下）
   dir: ""
   max_bytes: 536870912            # 单文件上限 512 MiB（最多夹到 2 GiB）
   max_total_bytes: 10737418240    # ready 状态文件的总配额 10 GiB
   max_reserved_bytes: 2147483648  # 上传中（未 ready）的预留配额 2 GiB
   ttl_minutes: 1440               # 上传完成后 24 小时内未被下载则清理
-  upload_window_seconds: 300      # 创建后必须在此时间内传完
+  upload_window_seconds: 3600     # 创建后必须在此时间内传完（总上限）
+  upload_stall_seconds: 60        # 上传无进展超过此秒数才清理
   upload_per_minute: 10           # 每 IP 每分钟创建暂存次数
   download_per_minute: 60         # 每 IP 每分钟下载尝试次数
   max_fail_per_share: 5           # 连续下载失败达到此次数后锁定 5 分钟

@@ -20,6 +20,9 @@ const GCM_OVERHEAD = 12 + 16; // nonce + tag
 const SCTP_DEFAULT_MAX = 256 * 1024; // 262144
 // Margin below SCTP maxMessageSize so encrypted payload fits in one DC message.
 const P2P_MAX_PLAINTEXT = SCTP_DEFAULT_MAX - GCM_OVERHEAD - 64;
+const PROTO_VERSION = 2;
+const PROTO_HELLO_TIMEOUT_MS = 2000;
+const P2P_DRAIN_GRACE_MS = 15000;
 
 function effectiveChunkSize(transport) {
 	return transport?.mode === "p2p"
@@ -120,6 +123,10 @@ const state = {
 	sendMode: "file", // "file" | "text"
 	textSend: false, // true when sending prepared text file
 	isTextPayload: false, // true when receiving kind:text metadata
+	manifestEnabled: false, // sender: peer negotiated proto v2
+	manifestExpected: false, // receiver: sender announced manifest mode
+	manifestTracker: null, // receiver: validated batch manifest tracker
+	legacyProtocol: false, // receiver: peer used pre-manifest protocol
 	bytesWritten: 0, // streaming mode: cumulative bytes written
 	share: { id: null, key: null, status: "idle", generation: 0, xhr: null },
 };
@@ -195,7 +202,7 @@ worker.onmessage = (e) => {
 	const { id, result, error, fatal } = e.data;
 	if (fatal) {
 		crocLog.error("wasm", "Worker fatal:", fatal);
-		pending.forEach((p) => p.reject(new Error(fatal)));
+		for (const p of pending.values()) p.reject(new Error(fatal));
 		pending.clear();
 		return;
 	}
@@ -251,7 +258,7 @@ function formatSize(bytes) {
 	if (bytes === 0) return "0 B";
 	const units = ["B", "KB", "MB", "GB", "TB"];
 	const i = Math.floor(Math.log(bytes) / Math.log(1024));
-	return (bytes / 1024 ** i).toFixed(i > 0 ? 1 : 0) + " " + units[i];
+	return `${(bytes / 1024 ** i).toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
 }
 
 function updateTransportModeUI(tab, mode) {
@@ -328,10 +335,25 @@ async function waitForStunPrecheck() {
 }
 
 function isBatchComplete() {
+	if (state.manifestTracker) return state.manifestTracker.complete();
+	if (state.manifestExpected) return false; // still waiting for the manifest
 	const fileDone =
 		state.totalChunks === 0 ||
 		(state.totalChunks > 0 && state.currentChunk >= state.totalChunks);
 	return fileDone && state.fileIndex >= state.fileCount - 1;
+}
+
+function incompleteTransferError() {
+	const tracker = state.manifestTracker;
+	if (!tracker) return new Error("传输未完成：未收到文件清单");
+	const missing = tracker
+		.missing()
+		.slice(0, 10)
+		.map((i) => i + 1)
+		.join("、");
+	return new Error(
+		`传输未完成：收到 ${tracker.receivedCount()}/${tracker.total} 个文件，缺少第 ${missing} 个`,
+	);
 }
 
 function resetForNextFile() {
@@ -435,8 +457,8 @@ function prepareTextFile(text) {
 }
 
 // ─── Optional one-shot staging for curl downloads ─────────────────────────
-// The relay only receives deriveShareKey(code); the passcode never leaves the
-// browser. Any failure here stays isolated from the primary WebSocket transfer.
+// The relay only receives a random share token unrelated to the passcode.
+// Any failure here stays isolated from the primary WebSocket transfer.
 function resetShareState() {
 	state.share.id = null;
 	state.share.key = null;
@@ -506,7 +528,7 @@ function sharePut(file, id, key, generation) {
 	});
 }
 
-async function maybeStartShare(code, file, multiFile, generation) {
+async function maybeStartShare(file, multiFile, generation) {
 	const stale = () => state.share.generation !== generation;
 	const cfgData = await loadClientConfig();
 	if (stale() || !cfgData?.share_enabled) return;
@@ -516,10 +538,8 @@ async function maybeStartShare(code, file, multiFile, generation) {
 	}
 	const maxBytes = Number(cfgData.share_max_bytes) || 0;
 	if (!(maxBytes > 0) || file.size > maxBytes) return;
-	const toggle = document.getElementById("toggle-cmd-download");
-	if (toggle && !toggle.checked) return;
 
-	const key = await window.crocSecurity.deriveShareKey(code);
+	const key = window.crocSecurity.generateShareKey();
 	if (stale()) return;
 	state.share.key = key;
 	state.share.status = "uploading";
@@ -580,16 +600,15 @@ async function maybeStartShare(code, file, multiFile, generation) {
 
 function maybeStartShareDownload() {
 	cancelShare();
-	// 快照口令与文件：setCode 之后 state 可能被下一次「开始发送」改写
-	const code = state.code;
+	// 快照文件：setCode 之后 state 可能被下一次「开始发送」改写
 	const file = state.files[0];
 	const multiFile = state.textSend || state.files.length !== 1;
 	const generation = state.share.generation;
 	if (multiFile) {
-		maybeStartShare(code, null, true, generation).catch(() => {});
+		maybeStartShare(null, true, generation).catch(() => {});
 		return;
 	}
-	maybeStartShare(code, file, false, generation).catch((err) => {
+	maybeStartShare(file, false, generation).catch((err) => {
 		window.crocLog?.warn("share", "unexpected:", err.message);
 		window.ui?.setShareState("hidden");
 	});
@@ -618,6 +637,12 @@ async function startSend(text) {
 	}
 
 	ui.setBusy("send", true);
+
+	// Reset protocol negotiation state from any previous transfer.
+	state.manifestEnabled = false;
+	state.manifestExpected = false;
+	state.manifestTracker = null;
+	state.legacyProtocol = false;
 
 	// Generate a room code
 	state.code = crocSecurity.generateSecureCode();
@@ -650,15 +675,21 @@ async function startSend(text) {
 
 // ─── Receive Flow ─────────────────────────────────────────────────────────
 async function startReceive(code) {
-	code = (code || "").trim();
-	if (!code) return;
-	if (code.length > 128) {
+	const normalizedCode = (code || "").trim();
+	if (!normalizedCode) return;
+	if (normalizedCode.length > 128) {
 		ui.showError("receive", "口令码过长");
 		return;
 	}
 
-	state.code = code;
+	state.code = normalizedCode;
 	state.role = "receiver";
+
+	// Reset protocol negotiation state from any previous transfer.
+	state.manifestEnabled = false;
+	state.manifestExpected = false;
+	state.manifestTracker = null;
+	state.legacyProtocol = false;
 
 	ui.enterTransfer("receive");
 	ui.setCardTitle("receive", "接收文件");
@@ -711,6 +742,30 @@ async function connectAndTransfer() {
 			} else {
 				pendingSignaling.push(msg);
 			}
+		};
+
+		// Protocol v2 capability hello. Both sides announce support; the sender
+		// then announces the authoritative mode so the receiver never guesses.
+		const protoHello = { sent: false, received: false, waiters: [] };
+		const sendProtoHello = () => {
+			if (protoHello.sent) return;
+			protoHello.sent = true;
+			ws.send(JSON.stringify({ type: "proto-hello", proto: PROTO_VERSION }));
+		};
+		const markProtoHello = () => {
+			if (protoHello.received) return;
+			protoHello.received = true;
+			for (const fn of protoHello.waiters.splice(0)) fn();
+		};
+		const waitProtoHello = (ms) => {
+			if (protoHello.received) return Promise.resolve(true);
+			return new Promise((resolveHello) => {
+				const timer = setTimeout(() => resolveHello(false), ms);
+				protoHello.waiters.push(() => {
+					clearTimeout(timer);
+					resolveHello(true);
+				});
+			});
 		};
 		let settled = false;
 		const resolveOnce = (v) => {
@@ -776,6 +831,16 @@ async function connectAndTransfer() {
 						pakeState = "paired";
 						crocLog.log(state.role, "paired, relay role:", msg.role);
 						enqueue(() => runPAKEInit());
+					} else if (msg.type === "proto-hello") {
+						sendProtoHello();
+						markProtoHello();
+					} else if (msg.type === "proto-mode") {
+						state.manifestExpected = msg.manifest === true;
+						crocLog.log(
+							state.role,
+							"peer manifest mode:",
+							state.manifestExpected,
+						);
 					} else if (isSignalingMessage(msg)) {
 						handleSignaling(msg);
 					} else if (msg.type === "error") {
@@ -796,16 +861,16 @@ async function connectAndTransfer() {
 					} else if (pakeState === "complete") {
 						if (state.transport?.mode === "relay") {
 							state.transport.dispatch(data);
-						} else if (!state.transport) {
+						} else if (state.transport) {
+							crocLog.warn(
+								"recv",
+								`ignored ${data.byteLength}B on ws in ${state.transport.mode} mode`,
+							);
+						} else {
 							pendingRelayBinary.push(data);
 							crocLog.warn(
 								"recv",
 								`buffered ${data.byteLength}B before transport ready (queue=${pendingRelayBinary.length})`,
-							);
-						} else {
-							crocLog.warn(
-								"recv",
-								`ignored ${data.byteLength}B on ws in ${state.transport.mode} mode`,
 							);
 						}
 					} else {
@@ -836,6 +901,23 @@ async function connectAndTransfer() {
 			if (!settled) {
 				if (state.role === "receiver" && isBatchComplete()) {
 					resolveOnce();
+				} else if (
+					state.role === "receiver" &&
+					state.transport?.mode === "p2p" &&
+					(state.manifestTracker || state.manifestExpected)
+				) {
+					// The sender closes the signaling WebSocket first; data already
+					// queued on the DataChannel can still arrive after that.
+					setTimeout(() => {
+						if (!isBatchComplete()) {
+							rejectOnce(incompleteTransferError());
+						}
+					}, P2P_DRAIN_GRACE_MS);
+				} else if (
+					state.role === "receiver" &&
+					(state.manifestTracker || state.manifestExpected)
+				) {
+					rejectOnce(incompleteTransferError());
 				} else {
 					rejectOnce(new Error(`Connection closed: code=${event.code}`));
 				}
@@ -891,6 +973,24 @@ async function connectAndTransfer() {
 
 					if (state.role === "sender") {
 						ui.setStatus("send", "密钥已建立，协商 P2P 连接…", "key");
+						sendProtoHello();
+						const manifestEnabled = await waitProtoHello(
+							PROTO_HELLO_TIMEOUT_MS,
+						);
+						ws.send(
+							JSON.stringify({
+								type: "proto-mode",
+								manifest: manifestEnabled,
+							}),
+						);
+						state.manifestEnabled = manifestEnabled;
+						if (!manifestEnabled) {
+							ui.setStatus(
+								"send",
+								"对方版本较旧，按兼容模式发送（未校验文件清单）…",
+								"wait",
+							);
+						}
 						const transport = await setupSenderTransport(
 							ws,
 							(n) => {
@@ -915,6 +1015,7 @@ async function connectAndTransfer() {
 							);
 						}
 					} else {
+						sendProtoHello();
 						ui.setStatus("receive", "密钥已建立，协商 P2P 连接…", "key");
 						state._metadataReceived = false;
 						state.merged = null;
@@ -956,10 +1057,41 @@ async function connectAndTransfer() {
 // being read + encrypted in the Worker. This overlaps file I/O, Worker
 // encryption, and transport.send so throughput is bounded by the slowest stage
 // rather than their sum. Backpressure (bufferedAmount) prevents unbounded buffering.
+async function sendManifest(transport) {
+	const files = state.files.map((file, index) => ({
+		index,
+		name: crocSecurity.sanitizeFilename(file.name),
+		size: file.size,
+		chunks: totalChunksForFile(file, transport),
+		...(state.textSend ? { kind: "text" } : {}),
+	}));
+	const manifest = {
+		fileCount: files.length,
+		totalBytes: files.reduce((sum, f) => sum + f.size, 0),
+		files,
+	};
+	const aad = crocSecurity.encodeAAD(
+		state.transferIdBytes,
+		crocSecurity.MANIFEST_FILE_INDEX,
+		crocSecurity.METADATA_AAD_SEQ,
+	);
+	const encrypted = await wasmCall(
+		"wasmEncrypt",
+		state.sessionKeyBytes,
+		aad,
+		new TextEncoder().encode(JSON.stringify(manifest)),
+	);
+	transport.send(encrypted);
+}
+
 async function sendAllFiles(transport) {
 	const files = state.files;
 	const fileCount = files.length;
 	const batchTotalChunks = batchTotalChunksForFiles(files, transport);
+	if (state.manifestEnabled) {
+		ui.setStatus("send", "正在发送文件清单…", "progress");
+		await sendManifest(transport);
+	}
 	if (state.textSend) {
 		ui.setStatus("send", "正在发送文本…", "progress");
 	} else {
@@ -968,15 +1100,15 @@ async function sendAllFiles(transport) {
 	for (let i = 0; i < fileCount; i++) {
 		await sendOneFile(transport, files[i], i, fileCount, batchTotalChunks);
 	}
-	ui.setStatus(
-		"send",
-		state.textSend
-			? "文本发送完成！"
-			: fileCount > 1
-				? `${fileCount} 个文件发送完成！`
-				: "文件发送完成！",
-		"success",
-	);
+	let doneMessage;
+	if (state.textSend) {
+		doneMessage = "文本发送完成！";
+	} else if (fileCount > 1) {
+		doneMessage = `${fileCount} 个文件发送完成！`;
+	} else {
+		doneMessage = "文件发送完成！";
+	}
+	ui.setStatus("send", doneMessage, "success");
 	ui.setProgress("send", 100, true);
 	state.textSend = false;
 }
@@ -1089,17 +1221,30 @@ async function finishCurrentFile() {
 		state.receivedFiles.push({ name: metadata.name, url });
 	}
 
-	if (state.fileIndex < state.fileCount - 1) {
+	const tracker = state.manifestTracker;
+	if (tracker) tracker.finish(metadata.fileIndex);
+	const batchComplete = tracker
+		? tracker.complete()
+		: state.fileIndex >= state.fileCount - 1;
+	if (!batchComplete) {
 		state.batchDoneChunks += metadata.chunks;
+		if (tracker) {
+			ui.setStatus(
+				"receive",
+				`已接收 ${tracker.receivedCount()}/${tracker.total()} 个文件，等待其余文件…`,
+				"progress",
+			);
+		}
 		resetForNextFile();
 		return false;
 	}
 
+	const legacyNote = state.legacyProtocol ? "（旧协议：未校验文件清单）" : "";
 	if (state.streaming) {
 		ui.setStatus(
 			"receive",
 			state.fileCount > 1
-				? `已接收 ${state.fileCount} 个文件`
+				? `已接收 ${state.fileCount} 个文件${legacyNote}`
 				: "文件已保存到磁盘！",
 			"success",
 		);
@@ -1109,8 +1254,8 @@ async function finishCurrentFile() {
 		ui.setStatus(
 			"receive",
 			state.fileCount > 1
-				? `已接收 ${state.fileCount} 个文件`
-				: "文件接收完成！",
+				? `已接收 ${state.fileCount} 个文件${legacyNote}`
+				: `文件接收完成！${legacyNote}`,
 			"success",
 		);
 		ui.showDownloads(state.receivedFiles);
@@ -1124,6 +1269,38 @@ async function handleReceivedData(data) {
 		crocLog.error("recv", "missing session key or transferId before decrypt");
 		throw new Error("Session not ready for decrypt");
 	}
+	if (state.manifestExpected && !state.manifestTracker) {
+		const aad = crocSecurity.encodeAAD(
+			state.transferIdBytes,
+			crocSecurity.MANIFEST_FILE_INDEX,
+			crocSecurity.METADATA_AAD_SEQ,
+		);
+		const decrypted = await wasmCall(
+			"wasmDecrypt",
+			state.sessionKeyBytes,
+			aad,
+			data,
+		);
+		let manifest;
+		try {
+			manifest = JSON.parse(new TextDecoder().decode(decrypted));
+		} catch (err) {
+			throw new Error(`Invalid manifest: ${err.message}`);
+		}
+		state.manifestTracker = crocSecurity.createManifestTracker(manifest);
+		state.fileCount = state.manifestTracker.total;
+		crocLog.log(
+			"recv",
+			`manifest ${state.fileCount} file(s), ${state.manifestTracker.manifest.totalBytes}B`,
+		);
+		ui.setStatus(
+			"receive",
+			`正在接收 ${state.fileCount} 个文件…`,
+			"progress",
+		);
+		return;
+	}
+
 	const fileIndex = state._metadataReceived ? state.fileIndex : 0;
 	const seq = state._metadataReceived
 		? state.currentChunk
@@ -1158,6 +1335,11 @@ async function handleReceivedData(data) {
 			throw new Error(`Invalid metadata: ${err.message}`);
 		}
 		metadata = crocSecurity.validateMetadata(metadata);
+		if (state.manifestTracker) {
+			state.manifestTracker.claim(metadata);
+		} else {
+			state.legacyProtocol = true;
+		}
 		crocLog.log(
 			"recv",
 			`metadata name=${metadata.name} size=${metadata.size} chunks=${metadata.chunks} idx=${metadata.fileIndex}/${metadata.fileCount}`,

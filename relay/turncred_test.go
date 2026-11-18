@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"strconv"
 	"strings"
 	"testing"
@@ -14,9 +15,15 @@ func TestGenerateTurnCredential(t *testing.T) {
 	ttl := time.Hour
 
 	username, credential := generateTurnCredential(secret, userID, ttl)
-	parts := strings.SplitN(username, ":", 2)
-	if len(parts) != 2 || parts[1] != userID {
+	parts := strings.SplitN(username, ":", 3)
+	if len(parts) != 3 || parts[1] != userID {
 		t.Fatalf("unexpected username format: %q", username)
+	}
+	if len(parts[2]) != 8 {
+		t.Fatalf("expected 8-char random suffix: %q", username)
+	}
+	if _, err := hex.DecodeString(parts[2]); err != nil {
+		t.Fatalf("suffix is not hex: %q", parts[2])
 	}
 
 	expiry, err := strconv.ParseInt(parts[0], 10, 64)
@@ -36,8 +43,14 @@ func TestGenerateTurnCredential(t *testing.T) {
 	}
 
 	u2, c2 := generateTurnCredential(secret, userID, ttl)
-	if u2 != username || c2 != credential {
-		t.Fatal("expected deterministic credential within same second")
+	if u2 == username || c2 == credential {
+		t.Fatal("expected per-request random suffix, got identical credentials")
+	}
+}
+
+func TestTurnCredentialDefaultTTL(t *testing.T) {
+	if got := turnCredentialTTL(defaultConfig()); got != 10*time.Minute {
+		t.Fatalf("default TTL: got %v", got)
 	}
 }
 

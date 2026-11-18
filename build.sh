@@ -14,6 +14,10 @@ echo "  → Building WASM module..."
 GOOS=js GOARCH=wasm go build -o public/croc.wasm ./wasm/
 echo "    ✅ public/croc.wasm ($(ls -lh public/croc.wasm | awk '{print $5}'))"
 
+# Record the artifact hash so a release can be verified after the fact.
+sha256sum public/croc.wasm > public/croc.wasm.sha256
+echo "    ✅ public/croc.wasm.sha256 ($(cut -d' ' -f1 public/croc.wasm.sha256))"
+
 # 3. Copy wasm_exec.js if needed
 WASM_EXEC=$(go env GOROOT)/lib/wasm/wasm_exec.js
 if [ -f "$WASM_EXEC" ]; then

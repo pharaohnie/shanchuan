@@ -1,6 +1,7 @@
 services:
   coturn:
-    image: coturn/coturn:latest
+    # 固定到当前线上镜像 digest，避免 latest 漂移
+    image: coturn/coturn@sha256:aa68aab64a3b929d57fc2924c98ea447bf996cf8dade2508e7b71eaf23f1f14e
     network_mode: host
     volumes:
       - ./turnserver.conf:/etc/coturn/turnserver.conf:ro

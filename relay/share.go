@@ -1,10 +1,9 @@
 // One-shot staging area for curl downloads.
 //
-// The relay never sees the passcode: the browser sends
-// shareKey = SHA256("croc-wasm/share/v1" + code) and this server keeps only
-// HMAC(pepper, shareKey), so a leaked database cannot be used to re-derive the
-// PAKE room and impersonate a peer. Staged files are plaintext on disk and are
-// deleted after one successful download.
+// The relay never sees the passcode: the browser sends a random 16-byte
+// shareKey unrelated to the room, and this server keeps only
+// HMAC(pepper, shareKey). Staged files are plaintext on disk and are deleted
+// after one successful download.
 package main
 
 import (
@@ -15,6 +14,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"mime"
@@ -36,10 +36,11 @@ const (
 )
 
 const (
-	shareClaimTimeout    = 10 * time.Minute
+	shareClaimTimeout    = 35 * time.Minute
 	shareWriteDeadline   = 30 * time.Minute
 	shareFailLockTimeout = 5 * time.Minute
 	shareOrphanGrace     = 2 * time.Minute
+	shareCopyChunk       = 1 << 20
 )
 
 var (
@@ -57,18 +58,20 @@ var (
 type shareState int
 
 type ShareItem struct {
-	ID          string
-	Filename    string
-	Path        string
-	Size        int64
-	KeyHash     [32]byte
-	State       shareState
-	CreatedAt   time.Time
-	ReadyAt     time.Time
-	ClaimedAt   time.Time
-	FailCount   int
-	LockedUntil time.Time
-	uploading   bool
+	ID           string
+	Filename     string
+	Path         string
+	Size         int64
+	KeyHash      [32]byte
+	State        shareState
+	CreatedAt    time.Time
+	ReadyAt      time.Time
+	ClaimedAt    time.Time
+	FailCount    int
+	LockedUntil  time.Time
+	LastProgress time.Time
+	Reserved     int64
+	uploading    bool
 }
 
 // ShareStore owns the staging directory and the state machine
@@ -92,6 +95,20 @@ func newShareStore(cfg ShareConfig) (*ShareStore, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	// MkdirAll 会跟随符号链接；这里显式拒绝，避免暂存目录被指向 public/ 等位置。
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("share dir %q must not be a symlink", dir)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("share dir %q is not a directory", dir)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, err
+	}
 	pepper := make([]byte, 32)
 	if _, err := rand.Read(pepper); err != nil {
 		return nil, err
@@ -108,6 +125,10 @@ func newShareStore(cfg ShareConfig) (*ShareStore, error) {
 		return nil, err
 	}
 	for _, e := range entries {
+		// 只删除本服务生成的暂存文件，目录里的其它内容一律不动。
+		if !isShareStagingName(e.Name()) {
+			continue
+		}
 		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
 			log.Printf("[share] cleanup %s failed: %v", e.Name(), err)
 		}
@@ -161,21 +182,72 @@ func (s *ShareStore) create(name string, size int64, keyHash [32]byte) (*ShareIt
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.reserved+size > s.cfg.MaxReservedBytes || s.total+s.reserved+size > s.cfg.MaxTotalBytes {
+	// 不按声明大小预留：配额在实际上传写入时逐块占用，
+	// 避免空 POST 用声明大小冻结配额。
+	if s.total+s.reserved >= s.cfg.MaxTotalBytes || s.reserved >= s.cfg.MaxReservedBytes {
 		return nil, errShareQuota
 	}
+	now := time.Now()
 	item := &ShareItem{
-		ID:        id,
-		Filename:  name,
-		Path:      filepath.Join(s.dir, id+".bin"),
-		Size:      size,
-		KeyHash:   keyHash,
-		State:     shareUploading,
-		CreatedAt: time.Now(),
+		ID:           id,
+		Filename:     name,
+		Path:         filepath.Join(s.dir, id+".bin"),
+		Size:         size,
+		KeyHash:      keyHash,
+		State:        shareUploading,
+		CreatedAt:    now,
+		LastProgress: now,
 	}
 	s.items[id] = item
-	s.reserved += size
 	return item, nil
+}
+
+// reserveBytes accounts for bytes actually written. It is called before each
+// write so a stalled or lying client cannot occupy more than the configured
+// reservation budget.
+func (s *ShareStore) reserveBytes(id string, n int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.items[id]
+	if !ok || item.State != shareUploading {
+		return errShareNotFound
+	}
+	if s.reserved+n > s.cfg.MaxReservedBytes || s.total+s.reserved+n > s.cfg.MaxTotalBytes {
+		return errShareQuota
+	}
+	s.reserved += n
+	item.Reserved += n
+	item.LastProgress = time.Now()
+	return nil
+}
+
+// copyUpload streams the request body into dst in bounded chunks, reserving
+// quota as bytes arrive.
+func (s *ShareStore) copyUpload(dst io.Writer, src io.Reader, id string) (int64, error) {
+	buf := make([]byte, shareCopyChunk)
+	var written int64
+	for {
+		nr, rerr := src.Read(buf)
+		if nr > 0 {
+			if err := s.reserveBytes(id, int64(nr)); err != nil {
+				return written, err
+			}
+			nw, werr := dst.Write(buf[:nr])
+			written += int64(nw)
+			if werr != nil {
+				return written, werr
+			}
+			if nw != nr {
+				return written, io.ErrShortWrite
+			}
+		}
+		if rerr == io.EOF {
+			return written, nil
+		}
+		if rerr != nil {
+			return written, rerr
+		}
+	}
 }
 
 // beginUpload validates a PUT and reserves the single writer for this item.
@@ -205,6 +277,7 @@ func (s *ShareStore) beginUpload(id string, keyHash [32]byte, contentLength int6
 		return 0, errShareBusy
 	}
 	item.uploading = true
+	item.LastProgress = time.Now()
 	return item.Size, nil
 }
 
@@ -213,6 +286,11 @@ func (s *ShareStore) uploadFailed(id string) {
 	defer s.mu.Unlock()
 	if item, ok := s.items[id]; ok {
 		item.uploading = false
+		s.reserved -= item.Reserved
+		item.Reserved = 0
+		if s.reserved < 0 {
+			s.reserved = 0
+		}
 	}
 }
 
@@ -229,7 +307,11 @@ func (s *ShareStore) markReady(id string, keyHash [32]byte) error {
 	item.uploading = false
 	item.State = shareReady
 	item.ReadyAt = time.Now()
-	s.reserved -= item.Size
+	s.reserved -= item.Reserved
+	item.Reserved = 0
+	if s.reserved < 0 {
+		s.reserved = 0
+	}
 	s.total += item.Size
 	return nil
 }
@@ -249,6 +331,9 @@ func (s *ShareStore) peek(id string, keyHash [32]byte) (*ShareItem, error) {
 	}
 	if time.Since(item.ReadyAt) > time.Duration(s.cfg.TTLMinutes)*time.Minute {
 		return nil, errShareNotFound
+	}
+	if time.Now().Before(item.LockedUntil) {
+		return nil, errShareLocked
 	}
 	return item, nil
 }
@@ -328,7 +413,7 @@ func (s *ShareStore) removeLocked(item *ShareItem) {
 	delete(s.items, item.ID)
 	switch item.State {
 	case shareUploading:
-		s.reserved -= item.Size
+		s.reserved -= item.Reserved
 	case shareReady:
 		s.total -= item.Size
 	case shareClaimed:
@@ -370,6 +455,8 @@ func (s *ShareStore) sweep(now time.Time) {
 		case shareUploading:
 			if now.Sub(item.CreatedAt) > time.Duration(s.cfg.UploadWindowSeconds)*time.Second {
 				reason = "upload window expired"
+			} else if now.Sub(item.LastProgress) > time.Duration(s.cfg.UploadStallSeconds)*time.Second {
+				reason = "upload stalled"
 			}
 		case shareReady:
 			if now.Sub(item.ReadyAt) > time.Duration(s.cfg.TTLMinutes)*time.Minute {
@@ -401,7 +488,7 @@ func (s *ShareStore) sweep(now time.Time) {
 		return
 	}
 	for _, e := range entries {
-		if live[e.Name()] {
+		if live[e.Name()] || !isShareStagingName(e.Name()) {
 			continue
 		}
 		path := filepath.Join(s.dir, e.Name())
@@ -514,7 +601,7 @@ func handleShareUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	n, copyErr := io.Copy(f, r.Body)
+	n, copyErr := shareStore.copyUpload(f, r.Body, id)
 	closeErr := f.Close()
 	if copyErr == nil && n != want {
 		copyErr = io.ErrUnexpectedEOF
@@ -523,6 +610,11 @@ func handleShareUpload(w http.ResponseWriter, r *http.Request) {
 		os.Remove(tmp)
 		shareStore.uploadFailed(id)
 		logShareEvent("upload failed", id, n)
+		if errors.Is(copyErr, errShareQuota) {
+			w.Header().Set("Retry-After", "30")
+			http.Error(w, "storage busy", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, "upload incomplete", http.StatusBadRequest)
 		return
 	}
@@ -660,6 +752,16 @@ func setShareWriteDeadline(w http.ResponseWriter) {
 		!errors.Is(err, http.ErrNotSupported) {
 		log.Printf("[share] set write deadline failed: %v", err)
 	}
+}
+
+// isShareStagingName matches only files this service creates:
+// <32 lowercase hex>.bin or .part.
+func isShareStagingName(name string) bool {
+	ext := filepath.Ext(name)
+	if ext != ".bin" && ext != ".part" {
+		return false
+	}
+	return validShareID(strings.TrimSuffix(name, ext))
 }
 
 func (s *ShareStore) pathFor(id string) string {

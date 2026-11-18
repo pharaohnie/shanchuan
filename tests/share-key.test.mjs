@@ -14,20 +14,12 @@ const sec = loadSecurity();
 const SHARE_ID = "0123456789abcdef0123456789abcdef";
 const SHARE_KEY = "fedcba9876543210fedcba9876543210";
 
-test("deriveShareKey is stable and domain separated", async () => {
-	const a = await sec.deriveShareKey("Zx9PassCode");
-	const b = await sec.deriveShareKey("Zx9PassCode");
-	assert.equal(a, b);
+test("generateShareKey returns 32 hex chars and is random", () => {
+	const a = sec.generateShareKey();
+	const b = sec.generateShareKey();
 	assert.match(a, /^[0-9a-f]{32}$/);
-
-	const room = await sec.deriveRoomId("Zx9PassCode");
-	assert.notEqual(a, room.slice(0, 32));
-	assert.equal(sec.SHARE_KEY_DOMAIN, "croc-wasm/share/v1");
-});
-
-test("deriveShareKey rejects empty codes", async () => {
-	await assert.rejects(() => sec.deriveShareKey(""), /code required/);
-	await assert.rejects(() => sec.deriveShareKey(undefined), /code required/);
+	assert.match(b, /^[0-9a-f]{32}$/);
+	assert.notEqual(a, b);
 });
 
 test("buildCurlCommand produces a single-shot, retry-safe command", () => {

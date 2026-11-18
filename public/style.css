@@ -963,23 +963,6 @@ body {
 }
 
 /* ─── Share / curl command ──────────────────────────────────────────────── */
-.share-toggle {
-	display: flex;
-	align-items: flex-start;
-	gap: var(--space-xs);
-	margin-top: var(--space-sm);
-	color: var(--ink-3);
-	font-size: var(--text-xs);
-	line-height: 1.5;
-	cursor: pointer;
-}
-
-.share-toggle input[type="checkbox"] {
-	margin-top: 0.15em;
-	accent-color: var(--signal);
-	flex: none;
-}
-
 .cmd-display .cmd-row {
 	background: var(--paper-sunken);
 	border: 1px solid var(--rule-strong);

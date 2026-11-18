@@ -33,7 +33,8 @@ type CORSConfig struct {
 }
 
 type WebSocketConfig struct {
-	AllowedOrigins []string `yaml:"allowed_origins"`
+	AllowedOrigins     []string `yaml:"allowed_origins"`
+	JoinTimeoutSeconds int      `yaml:"join_timeout_seconds"`
 }
 
 type IceServerConfig struct {
@@ -57,6 +58,8 @@ type TurnConfig struct {
 type RateLimitConfig struct {
 	JoinPerMinute      int      `yaml:"join_per_minute"`
 	StunCheckPerMinute int      `yaml:"stun_check_per_minute"`
+	ConfigPerMinute    int      `yaml:"config_per_minute"`
+	MaxWSConnsPerIP    int      `yaml:"max_ws_conns_per_ip"`
 	TrustForwardedIP   bool     `yaml:"trust_forwarded_ip"`
 	TrustedProxyCIDRs  []string `yaml:"trusted_proxy_cidrs"`
 }
@@ -75,6 +78,7 @@ type ShareConfig struct {
 	MaxReservedBytes    int64  `yaml:"max_reserved_bytes"`
 	TTLMinutes          int    `yaml:"ttl_minutes"`
 	UploadWindowSeconds int    `yaml:"upload_window_seconds"`
+	UploadStallSeconds  int    `yaml:"upload_stall_seconds"`
 	UploadPerMinute     int    `yaml:"upload_per_minute"`
 	DownloadPerMinute   int    `yaml:"download_per_minute"`
 	MaxFailPerShare     int    `yaml:"max_fail_per_share"`
@@ -102,20 +106,24 @@ func defaultConfig() Config {
 			AllowedOrigins: []string{"http://localhost:8154"},
 		},
 		WebSocket: WebSocketConfig{
-			AllowedOrigins: []string{"http://localhost:8154"},
+			AllowedOrigins:     []string{"http://localhost:8154"},
+			JoinTimeoutSeconds: 10,
 		},
 		Client: ClientConfig{RelayURL: "", PublicURL: ""},
 		RateLimit: RateLimitConfig{
 			JoinPerMinute:      30,
 			StunCheckPerMinute: 10,
+			ConfigPerMinute:    60,
+			MaxWSConnsPerIP:    8,
 		},
 		Share: ShareConfig{
-			Enabled:             true,
+			Enabled:             false,
 			MaxBytes:            512 << 20,
 			MaxTotalBytes:       10 << 30,
 			MaxReservedBytes:    2 << 30,
 			TTLMinutes:          1440,
-			UploadWindowSeconds: 300,
+			UploadWindowSeconds: 3600,
+			UploadStallSeconds:  60,
 			UploadPerMinute:     10,
 			DownloadPerMinute:   60,
 			MaxFailPerShare:     5,
@@ -153,8 +161,17 @@ func loadConfig(path string) (Config, error) {
 	if cfg.RateLimit.StunCheckPerMinute <= 0 {
 		cfg.RateLimit.StunCheckPerMinute = 10
 	}
+	if cfg.RateLimit.ConfigPerMinute <= 0 {
+		cfg.RateLimit.ConfigPerMinute = 60
+	}
+	if cfg.RateLimit.MaxWSConnsPerIP <= 0 {
+		cfg.RateLimit.MaxWSConnsPerIP = 8
+	}
+	if cfg.WebSocket.JoinTimeoutSeconds <= 0 {
+		cfg.WebSocket.JoinTimeoutSeconds = 10
+	}
 	if cfg.Turn.CredentialTTLSeconds <= 0 {
-		cfg.Turn.CredentialTTLSeconds = 86400
+		cfg.Turn.CredentialTTLSeconds = 600
 	}
 	if cfg.Share.MaxBytes <= 0 {
 		cfg.Share.MaxBytes = 512 << 20
@@ -176,7 +193,10 @@ func loadConfig(path string) (Config, error) {
 		cfg.Share.TTLMinutes = 1440
 	}
 	if cfg.Share.UploadWindowSeconds <= 0 {
-		cfg.Share.UploadWindowSeconds = 300
+		cfg.Share.UploadWindowSeconds = 3600
+	}
+	if cfg.Share.UploadStallSeconds <= 0 {
+		cfg.Share.UploadStallSeconds = 60
 	}
 	if cfg.Share.UploadPerMinute <= 0 {
 		cfg.Share.UploadPerMinute = 10
@@ -210,12 +230,16 @@ func parseTrustedProxyCIDRs(cidrs []string) ([]*net.IPNet, error) {
 }
 
 func isTrustedProxy(remoteAddr string) bool {
-	if len(trustedProxyNets) == 0 {
-		return false
-	}
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
 		host = remoteAddr
+	}
+	return isTrustedProxyIP(host)
+}
+
+func isTrustedProxyIP(host string) bool {
+	if len(trustedProxyNets) == 0 {
+		return false
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {

@@ -5,6 +5,9 @@
 // particle background via `window.bgFX` (optional chaining — the background
 // is decorative and may be absent).
 
+/* global croc, formatSize */
+// croc / formatSize 由后加载的 app.js 定义，只在 DOMContentLoaded 之后调用。
+
 const $ = (id) => document.getElementById(id);
 
 // ─── Inline SVG icons (Lucide-style, 24×24 stroke) ────────────────────────

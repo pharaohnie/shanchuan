@@ -22,6 +22,7 @@ const testShareKey = "0123456789abcdef0123456789abcdef"
 func initTestShare(t *testing.T, mutate ...func(*ShareConfig)) *ShareStore {
 	t.Helper()
 	cfg = defaultConfig()
+	cfg.Share.Enabled = true // 分享默认关闭；测试直接验证启用后的行为
 	if len(mutate) > 0 {
 		mutate[0](&cfg.Share)
 	}
@@ -252,6 +253,18 @@ func TestShareUploadingReturns503NoClaim(t *testing.T) {
 	}
 }
 
+func TestShareDisabledReturns404(t *testing.T) {
+	initTestShare(t)
+	cfg.Share.Enabled = false
+	mux := shareTestMux()
+	if code, _ := shareCreate(t, mux, testShareKey, "off.bin", 4); code != http.StatusNotFound {
+		t.Fatalf("create while disabled: got %d", code)
+	}
+	if rec := shareDownload(t, mux, http.MethodGet, testShareKey, strings.Repeat("a", 32)); rec.Code != http.StatusNotFound {
+		t.Fatalf("download while disabled: got %d", rec.Code)
+	}
+}
+
 func TestShareTooLarge(t *testing.T) {
 	initTestShare(t, func(c *ShareConfig) { c.MaxBytes = 16 })
 	mux := shareTestMux()
@@ -309,18 +322,177 @@ func TestShareQuotaReserved(t *testing.T) {
 		c.MaxTotalBytes = 10
 	})
 	mux := shareTestMux()
-	if code, _ := shareCreate(t, mux, testShareKey, "a.bin", 10); code != http.StatusCreated {
+	code, idA := shareCreate(t, mux, testShareKey, "a.bin", 10)
+	if code != http.StatusCreated {
 		t.Fatalf("first create: %d", code)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/api/share", strings.NewReader(`{"name":"b.bin","size":10}`))
-	req.Header.Set("X-Share-Key", testShareKey)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503 when reserved budget is full, got %d", rec.Code)
+	code, idB := shareCreate(t, mux, testShareKey, "b.bin", 10)
+	if code != http.StatusCreated {
+		t.Fatalf("second create: %d", code)
 	}
-	if rec.Header().Get("Retry-After") == "" {
-		t.Fatal("quota rejections should advertise Retry-After")
+	// 声明大小不再占用配额，只有实际写入才占。
+	if shareStore.reserved != 0 {
+		t.Fatalf("create must not reserve: %d", shareStore.reserved)
+	}
+
+	if rec := shareUpload(t, mux, testShareKey, idA, make([]byte, 10)); rec.Code != http.StatusNoContent {
+		t.Fatalf("upload a: %d", rec.Code)
+	}
+	if rec := shareUpload(t, mux, testShareKey, idB, bytes.Repeat([]byte("b"), 10)); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when write exceeds budget, got %d", rec.Code)
+	}
+	if shareStore.reserved != 0 || shareStore.items[idB].Reserved != 0 {
+		t.Fatalf("failed upload leaked reservation: reserved=%d item=%d", shareStore.reserved, shareStore.items[idB].Reserved)
+	}
+	if _, err := os.Stat(shareStore.partPathFor(idB)); !os.IsNotExist(err) {
+		t.Fatalf("failed upload should remove temp file, err=%v", err)
+	}
+
+	if code, _ := shareCreate(t, mux, testShareKey, "c.bin", 1); code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when total budget is full, got %d", code)
+	}
+}
+
+func TestShareSweepUploadStall(t *testing.T) {
+	store := initTestShare(t)
+	mux := shareTestMux()
+	_, alive := shareCreate(t, mux, testShareKey, "alive.bin", 4)
+	_, stalled := shareCreate(t, mux, testShareKey, "stalled.bin", 4)
+	_, expired := shareCreate(t, mux, testShareKey, "expired.bin", 4)
+
+	now := time.Now()
+	store.mu.Lock()
+	store.items[alive].CreatedAt = now.Add(-10 * time.Minute)
+	store.items[alive].LastProgress = now.Add(-5 * time.Second)
+	store.items[stalled].LastProgress = now.Add(-2 * time.Minute)
+	store.items[expired].CreatedAt = now.Add(-2 * time.Hour)
+	store.items[expired].LastProgress = now.Add(-time.Second)
+	store.mu.Unlock()
+
+	store.sweep(now)
+	if _, ok := store.items[alive]; !ok {
+		t.Fatal("recently progressing upload must survive sweep")
+	}
+	if _, ok := store.items[stalled]; ok {
+		t.Fatal("stalled upload should be swept")
+	}
+	if _, ok := store.items[expired]; ok {
+		t.Fatal("upload past total window should be swept")
+	}
+}
+
+func TestShareClaimTimeoutCoversSlowDownload(t *testing.T) {
+	store := initTestShare(t)
+	mux := shareTestMux()
+	id := mustShareReady(t, mux, "slow.bin", []byte("slow"))
+
+	now := time.Now()
+	store.mu.Lock()
+	store.items[id].State = shareClaimed
+	store.items[id].ClaimedAt = now.Add(-11 * time.Minute)
+	store.mu.Unlock()
+	store.sweep(now)
+	if _, ok := store.items[id]; !ok {
+		t.Fatal("claim shorter than write deadline must not be swept")
+	}
+
+	store.mu.Lock()
+	store.items[id].ClaimedAt = now.Add(-36 * time.Minute)
+	store.mu.Unlock()
+	store.sweep(now)
+	if _, ok := store.items[id]; ok {
+		t.Fatal("stuck claim should be swept after 35m")
+	}
+	if store.total != 0 {
+		t.Fatalf("accounting leak: total=%d", store.total)
+	}
+}
+
+func TestShareHeadRespectsFailLock(t *testing.T) {
+	store := initTestShare(t)
+	mux := shareTestMux()
+	id := mustShareReady(t, mux, "locked.bin", []byte("data"))
+
+	store.mu.Lock()
+	store.items[id].LockedUntil = time.Now().Add(5 * time.Minute)
+	store.mu.Unlock()
+
+	if rec := shareDownload(t, mux, http.MethodHead, testShareKey, id); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("HEAD must respect lock: got %d", rec.Code)
+	}
+	if rec := shareDownload(t, mux, http.MethodGet, testShareKey, id); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("GET must respect lock: got %d", rec.Code)
+	}
+
+	store.mu.Lock()
+	store.items[id].LockedUntil = time.Time{}
+	store.mu.Unlock()
+	if rec := shareDownload(t, mux, http.MethodHead, testShareKey, id); rec.Code != http.StatusOK {
+		t.Fatalf("HEAD after lock: got %d", rec.Code)
+	}
+}
+
+func TestShareStoreDirSafetyAndCleanup(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	valid := strings.Repeat("a", 32)
+	for _, name := range []string{valid + ".bin", valid + ".part"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keep := filepath.Join(dir, "keep.txt")
+	if err := os.WriteFile(keep, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := defaultConfig().Share
+	cfg.Dir = dir
+	if _, err := newShareStore(cfg); err != nil {
+		t.Fatalf("newShareStore: %v", err)
+	}
+	for _, name := range []string{valid + ".bin", valid + ".part"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("staging file %s should be removed at startup, err=%v", name, err)
+		}
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("unrelated file must not be removed: %v", err)
+	}
+	// 运行期孤儿清理也只处理本服务的暂存文件名。
+	old := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(keep, old, old); err != nil {
+		t.Fatal(err)
+	}
+	s, err := newShareStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.sweep(time.Now())
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("sweep must not remove unrelated file: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("share dir permissions: got %o", info.Mode().Perm())
+	}
+}
+
+func TestShareStoreRejectsSymlinkDir(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "share")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	cfg := defaultConfig().Share
+	cfg.Dir = link
+	if _, err := newShareStore(cfg); err == nil {
+		t.Fatal("expected symlink share dir to be rejected")
 	}
 }
 

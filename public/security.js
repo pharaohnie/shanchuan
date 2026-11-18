@@ -7,16 +7,16 @@
 	const MAX_CHUNKS = 8192;
 	const MAX_FILE_COUNT = 100;
 	const MAX_FILENAME_LENGTH = 255;
-	const CODE_LENGTH = 10;
+	const CODE_LENGTH = 12;
 	const CODE_CHARS =
 		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 	const CODE_CHARS_LEN = CODE_CHARS.length;
 	const ROOM_ID_DOMAIN = "croc-wasm/room/v1";
 	const TRANSFER_ID_DOMAIN = "croc-wasm/transfer/v1";
-	const SHARE_KEY_DOMAIN = "croc-wasm/share/v1";
 	const SHARE_ID_RE = /^[0-9a-f]{32}$/;
 	const METADATA_AAD_SEQ = 0xffffffff;
 	const METADATA_FILE_INDEX = 0xffffffff;
+	const MANIFEST_FILE_INDEX = 0xfffffffe;
 	const WINDOWS_RESERVED = new Set([
 		"CON", "PRN", "AUX", "NUL",
 		"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
@@ -34,17 +34,12 @@
 			.join("");
 	}
 
-	// 32 hex chars derived from the passcode; the relay only ever sees this
-	// value, never the code itself (which also unlocks the PAKE room).
-	async function deriveShareKey(code) {
-		if (typeof code !== "string" || !code) {
-			throw new Error("deriveShareKey: code required");
-		}
-		const data = new TextEncoder().encode(SHARE_KEY_DOMAIN + code);
-		const hash = await crypto.subtle.digest("SHA-256", data);
-		return [...new Uint8Array(hash).slice(0, 16)]
-			.map((b) => b.toString(16).padStart(2, "0"))
-			.join("");
+	// 32 hex chars from 16 random bytes. Independent of the passcode, so the
+	// relay cannot link a staged file back to a room even if it logs both.
+	function generateShareKey() {
+		const buf = new Uint8Array(16);
+		crypto.getRandomValues(buf);
+		return [...buf].map((b) => b.toString(16).padStart(2, "0")).join("");
 	}
 
 	function isSecureShareBase(url) {
@@ -198,6 +193,128 @@
 		return { ...metadata, name, fileCount, fileIndex, chunks, size, batchTotalChunks };
 	}
 
+	function normalizeKind(kind) {
+		if (kind === undefined || kind === null || kind === "" || kind === "file") {
+			return "file";
+		}
+		if (kind === "text") return "text";
+		throw new Error(`Invalid manifest: unsupported kind ${String(kind)}`);
+	}
+
+	function validateManifest(manifest) {
+		if (!manifest || typeof manifest !== "object") {
+			throw new Error("Invalid manifest: expected object");
+		}
+		const fileCount = validatePositiveInt(
+			manifest.fileCount,
+			"fileCount",
+			MAX_FILE_COUNT,
+		);
+		if (fileCount < 1) {
+			throw new Error("Invalid manifest: fileCount must be positive");
+		}
+		const totalBytes = validatePositiveInt(
+			manifest.totalBytes,
+			"totalBytes",
+			MAX_BATCH_BYTES,
+		);
+		if (!Array.isArray(manifest.files) || manifest.files.length !== fileCount) {
+			throw new Error("Invalid manifest: files must match fileCount");
+		}
+		const seen = new Set();
+		let sum = 0;
+		const files = manifest.files.map((entry) => {
+			if (!entry || typeof entry !== "object") {
+				throw new Error("Invalid manifest: bad file entry");
+			}
+			const index = validatePositiveInt(
+				entry.index,
+				"fileIndex",
+				fileCount - 1,
+			);
+			if (seen.has(index)) {
+				throw new Error(`Invalid manifest: duplicate file index ${index}`);
+			}
+			seen.add(index);
+			const size = validatePositiveInt(entry.size, "size", MAX_FILE_BYTES);
+			const chunks = validatePositiveInt(entry.chunks, "chunks", MAX_CHUNKS);
+			if (size > 0 && chunks === 0) {
+				throw new Error("Invalid manifest: chunks must be > 0 when size > 0");
+			}
+			if (size === 0 && chunks !== 0) {
+				throw new Error("Invalid manifest: empty file must have 0 chunks");
+			}
+			sum += size;
+			return {
+				index,
+				name: sanitizeFilename(entry.name),
+				size,
+				chunks,
+				kind: normalizeKind(entry.kind),
+			};
+		});
+		if (sum !== totalBytes) {
+			throw new Error("Invalid manifest: totalBytes does not match files");
+		}
+		files.sort((a, b) => a.index - b.index);
+		return { fileCount, totalBytes, files };
+	}
+
+	function createManifestTracker(manifest) {
+		const normalized = validateManifest(manifest);
+		const byIndex = new Map(normalized.files.map((f) => [f.index, f]));
+		const claimed = new Set();
+		const done = new Set();
+
+		function claim(metadata) {
+			if (!metadata || typeof metadata !== "object") {
+				throw new Error("Manifest check: expected metadata object");
+			}
+			const index = metadata.fileIndex;
+			const entry = byIndex.get(index);
+			if (!entry) {
+				throw new Error(`Manifest check: file index ${index} is not in the manifest`);
+			}
+			if (claimed.has(index)) {
+				throw new Error(`Manifest check: duplicate file index ${index}`);
+			}
+			if (metadata.fileCount !== normalized.fileCount) {
+				throw new Error("Manifest check: fileCount does not match manifest");
+			}
+			if (
+				metadata.name !== entry.name ||
+				metadata.size !== entry.size ||
+				metadata.chunks !== entry.chunks ||
+				normalizeKind(metadata.kind) !== entry.kind
+			) {
+				throw new Error(`Manifest check: file ${index} does not match manifest`);
+			}
+			claimed.add(index);
+		}
+
+		function finish(index) {
+			if (!claimed.has(index)) {
+				throw new Error(
+					`Manifest check: file ${index} finished before metadata`,
+				);
+			}
+			done.add(index);
+		}
+
+		return {
+			manifest: normalized,
+			total: normalized.fileCount,
+			claim,
+			finish,
+			complete: () => done.size === normalized.fileCount,
+			receivedCount: () => done.size,
+			missing: () =>
+				normalized.files
+					.filter((f) => !done.has(f.index))
+					.map((f) => f.index),
+		};
+	}
+
 	function validateSendFiles(files) {
 		if (!files.length) {
 			throw new Error("No files selected");
@@ -264,20 +381,22 @@
 		CODE_LENGTH,
 		sanitizeFilename,
 		validateMetadata,
+		validateManifest,
+		createManifestTracker,
 		validateSendFiles,
 		generateSecureCode,
 		deriveRelayURL,
 		deriveRoomId,
 		deriveTransferId,
-		deriveShareKey,
+		generateShareKey,
 		buildCurlCommand,
 		encodeAAD,
 		dedupeFilename,
 		isInsecureRelayURL,
 		ROOM_ID_DOMAIN,
 		TRANSFER_ID_DOMAIN,
-		SHARE_KEY_DOMAIN,
 		METADATA_AAD_SEQ,
 		METADATA_FILE_INDEX,
+		MANIFEST_FILE_INDEX,
 	};
 })(typeof window === "undefined" ? globalThis : window);
